@@ -1,89 +1,105 @@
-# Updated app.py with Qwen 2.5 72B + Mistral 7B fallback
-# (Interface fully preserved)
-
-# NOTE: Due to response length limits in this environment, 
-# I will now produce the updated code in multiple steps if needed.
-
-# --- START OF FILE ---
-
 import streamlit as st
 from streamlit_mic_recorder import mic_recorder
+import google.generativeai as genai
 import re
 import json
 import time
-import requests
 
 # =========================
-# MODEL ENDPOINTS (OpenRouter)
+# GEMINI API KEY (Secrets)
 # =========================
-OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-
-# Load API keys
 try:
     GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
 except Exception:
     GEMINI_API_KEY = None
 
-try:
-    OPENROUTER_API_KEY = st.secrets["OPENROUTER_API_KEY"]
-except Exception:
-    OPENROUTER_API_KEY = None
-
-if not OPENROUTER_API_KEY:
-    st.error("⚠️ Missing OPENROUTER_API_KEY in secrets.")
+if not GEMINI_API_KEY:
+    st.error("⚠️ No GEMINI_API_KEY found. Add it to .streamlit/secrets.toml.")
     st.stop()
 
-# Make the UI unchanged
+genai.configure(api_key=GEMINI_API_KEY)
+
+# =========================
+#  PAGE CONFIG + CSS
+# =========================
 st.set_page_config(
     page_title="Mental Health Stress Detector - Dark Mode",
     page_icon="🧠",
     layout="wide",
     initial_sidebar_state="expanded",
 )
+st.markdown("""
+<style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&family=Space+Grotesk:wght@500;700&display=swap');
+    .stApp {background: linear-gradient(120deg, #22223b, #4b3a62 65%, #22223b 100%);}
+    .main-header {background:rgba(20,24,38,0.95);padding:2rem;border-radius:18px;text-align:center;margin-bottom:2rem;box-shadow:0 10px 25px #31185e60;}
+    .main-header h1 {font-family:'Space Grotesk',sans-serif;font-size:2.8rem;font-weight:700;background:-webkit-linear-gradient(135deg,#00fff5,#bb86fc 80%);-webkit-background-clip:text;-webkit-text-fill-color:transparent;letter-spacing:1.2px;}
+    .main-header p {color:#c9aaff;font-size:1.1rem;font-weight:400;letter-spacing:1px;}
+    .info-card {background:rgba(49,24,94,0.65);padding:1.5rem;border-radius:16px;box-shadow:0 4px 18px #31185e40;margin-bottom:1.2rem;}
+    .info-card h3 {color:#bb86fc;font-size:1.2rem;font-weight:600;}
+    .stTextArea textarea {border-radius:12px!important;border:2px solid #bb86fc!important;background-color:#22223b!important;color:#fafafa!important;}
+    .stButton > button {background:linear-gradient(90deg,#00fff5,#755edb);color:white;border:none;font-weight:700;padding:0.8rem 1.3rem;border-radius:22px;font-size:1.05rem;}
+    .stButton > button:hover {background:linear-gradient(90deg,#755edb,#00fff5);}
+    .response-area {background: linear-gradient(135deg,#211a33,#321c43 70%,#211a33 100%); padding:2rem;border-radius:18px;box-shadow:0 4px 16px #31185e40;}
+    .response-area h3 {color:#00fff5;font-size:1.4rem;}
+    .emergency-banner {background:linear-gradient(135deg,#f093fb,#f5576c);color:white;padding:1.2rem;border-radius:16px;text-align:center;font-weight:700;margin:1rem 0;font-size:1.1rem;}
+    .stress-meter-container {display:flex;flex-direction:column;align-items:center;margin:1.5rem 0;}
+    .circular-gauge {width:140px;height:140px;border-radius:50%;background:conic-gradient(#00ff88 0%,#ffc107 50%,#ff6b6b 90%,#31185e 100%);display:flex;align-items:center;justify-content:center;}
+    .gauge-inner {width:100px;height:100px;border-radius:50%;background:#22223b;display:flex;flex-direction:column;align-items:center;justify-content:center;}
+    .stress-percentage {font-size:2.8rem;font-weight:700;color:#00fff5;}
+    .stress-label {font-size:0.95rem;color:#bb86fc;text-transform:uppercase;}
+</style>
+""", unsafe_allow_html=True)
 
-# =======================================
-# CALL OPENROUTER MODEL (Qwen + Mistral)
-# =======================================
-def call_openrouter(model, prompt, max_tokens=300):
-    headers = {
-        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-        "Content-Type": "application/json",
-    }
-    payload = {
-        "model": model,
-        "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": max_tokens,
-    }
-    try:
-        r = requests.post(OPENROUTER_URL, headers=headers, json=payload, timeout=25)
-        if r.status_code == 200:
-            return r.json()["choices"][0]["message"]["content"]
-        else:
-            return None
-    except Exception:
-        return None
+# ====== MODEL NAMES (unchanged UI labels) ======
+MODEL_NAMES = {
+    "Gemini 2.5 Pro": "models/gemini-2.5-pro",
+    "Gemini 2.5 Flash": "models/gemini-2.5-flash"
+}
+SIDEBAR_MODEL_KEYS = list(MODEL_NAMES.keys())
 
-# =======================================
-# SAFE GENERATION WRAPPER
-# Qwen 72B → fallback: Mistral 7B
-# =======================================
-def safe_generate(prompt):
-    # 1️⃣ Try Qwen 2.5 72B (free + smart)
-    qwen_output = call_openrouter("qwen/qwen2.5-72b-instruct", prompt)
-    if qwen_output:
-        return qwen_output
-
-    # 2️⃣ Fallback to Mistral 7B (fast, always works)
-    mistral_output = call_openrouter("mistralai/mistral-7b-instruct", prompt)
-    if mistral_output:
-        st.warning("⚠️ Using fallback model: Mistral 7B (Qwen quota or timeout).")
-        return mistral_output
-
+# -------------------------
+# Safe generate wrapper with fallback and exponential backoff
+# -------------------------
+def safe_generate(model_id, prompt, max_retries=2, backoff_base=2):
+    """
+    Generate content safely.
+    - If a quota 429 occurs, automatically switch to flash fallback.
+    - Retries a small number of times with backoff for transient errors.
+    """
+    attempt = 0
+    last_exc = None
+    while attempt <= max_retries:
+        try:
+            model = genai.GenerativeModel(model_id)
+            return model.generate_content(prompt)
+        except Exception as e:
+            last_exc = e
+            msg = str(e).lower()
+            # Quota / rate limit -> fallback to flash
+            if "429" in msg or "quota" in msg or "rate limit" in msg:
+                # If already using flash, break
+                if model_id == "models/gemini-2.5-flash":
+                    # cannot recover
+                    return None
+                # warn user once
+                st.warning("⚠️ Model quota/rate limit reached. Switching to Gemini 2.5 Flash as fallback.")
+                try:
+                    model_id = "models/gemini-2.5-flash"
+                    model = genai.GenerativeModel(model_id)
+                    return model.generate_content(prompt)
+                except Exception:
+                    return None
+            # transient network error -> retry
+            attempt += 1
+            time.sleep(backoff_base ** attempt * 0.5)
+    # final failure
+    st.error("AI request failed. Using offline fallback where possible.")
     return None
 
-# ================================
-# LEXICON SCORE (unchanged)
-# ================================
+# -------------------------
+# Lexicon scoring (same but stable)
+# -------------------------
 LEXICON_WEIGHTS = {
     "suicid": 5, "kill myself": 5, "end my life": 5, "i want to die": 5, "worthless": 4,
     "panic": 4, "panic attack": 4, "hopeless": 4, "overwhelmed": 4, "can't cope": 4,
@@ -93,114 +109,324 @@ LEXICON_WEIGHTS = {
 
 def lexicon_score(text):
     t = text.lower()
-    score = 0
-    for k, w in LEXICON_WEIGHTS.items():
-        if k in t:
+    score = 0.0
+    for kw, w in LEXICON_WEIGHTS.items():
+        if kw in t:
             score += w
     if any(k in t for k in ["suicid", "kill myself", "i want to die", "end my life"]):
-        score = max(score, 8)
-    return int(min(1.0, score / 10) * 100)
+        score = max(score, 8.0)
+    return int(round(min(1.0, score / 10.0) * 100))
 
-# =======================================
-# ASK QWEN/MISTRAL FOR JSON SCORE
-# =======================================
-
-def ask_model_for_structured_stress(text):
-    prompt = f"""
-Return STRICT JSON like this:
-{{"score":0-100, "evidence":[], "confidence":0.0-1.0}}
-
-Text: {text}
-"""
-    out = safe_generate(prompt)
-    if not out:
+# -------------------------
+# Deep reasoning check (model rates intensity 0-100)
+# -------------------------
+def ask_model_for_intensity(user_text, model_id):
+    """
+    Ask the model to give a simple integer intensity 0-100 and a confidence.
+    This is a short, directed prompt to get a concise numeric result.
+    """
+    prompt = (
+        "You are an evaluator that gives a concise numeric emotional intensity score.\n"
+        "Reply with ONLY valid JSON: {\"intensity\": <0-100>, \"confidence\": <0.0-1.0>}.\n\n"
+        f"Text: {user_text}\n"
+    )
+    resp = safe_generate(model_id, prompt)
+    if not resp:
         return None
-
-    match = re.search(r"\{[\s\S]*\}", out)
+    txt = resp.text.strip()
+    # try to extract JSON
+    match = re.search(r"\{[\s\S]*?\}", txt)
     if not match:
         return None
-
     try:
         data = json.loads(match.group())
-        return {
-            "model_score": int(data.get("score", 50)),
-            "evidence": data.get("evidence", []),
-            "confidence": float(data.get("confidence", 0.5)),
-        }
-    except:
+        intensity = int(max(0, min(100, int(data.get("intensity", 50)))))
+        confidence = float(max(0.0, min(1.0, float(data.get("confidence", 0.5)))))
+        return {"intensity": intensity, "confidence": confidence}
+    except Exception:
         return None
 
-# =======================================
-# ASK QWEN/MISTRAL FOR INTENSITY
-# =======================================
-
-def ask_model_for_intensity(text):
-    prompt = f"""
-Give JSON only: {{"intensity":0-100, "confidence":0.0-1.0}}
-
-Text: {text}
-"""
-    out = safe_generate(prompt)
-    if not out:
+# -------------------------
+# Model structured stress extraction (robust JSON parse + repair)
+# -------------------------
+def ask_model_for_structured_stress(user_text, model_id):
+    """
+    Ask model to return JSON: {score, evidence, confidence}
+    Attempt to repair slight formatting issues in returned JSON.
+    """
+    prompt = (
+        "Return ONLY a single JSON object with keys:\n"
+        "score: integer 0-100\n"
+        "evidence: array of brief verbatim phrases from the user's text\n"
+        "confidence: float 0.0-1.0\n\n"
+        f"User text:\n{user_text}\n\n"
+        "Example: {\"score\":72, \"evidence\": [\"I can't sleep\"], \"confidence\":0.83}"
+    )
+    resp = safe_generate(model_id, prompt)
+    if not resp:
         return None
-
-    match = re.search(r"\{[\s\S]*\}", out)
+    txt = resp.text.strip()
+    # try to find JSON object; allow model to include backticks or text before/after
+    match = re.search(r'\{[\s\S]*\}', txt)
     if not match:
-        return None
-
+        # try to clean common issues (replace single quotes->double)
+        cleaned = txt.replace("'", '"')
+        match = re.search(r'\{[\s\S]*\}', cleaned)
+        if not match:
+            return None
+    json_text = match.group()
+    # attempt parse with small repairs
     try:
-        d = json.loads(match.group())
-        return {
-            "intensity": int(d.get("intensity", 50)),
-            "confidence": float(d.get("confidence", 0.5))
-        }
-    except:
-        return None
+        data = json.loads(json_text)
+    except Exception:
+        # minor repair: add missing quotes around keys (very naive)
+        repaired = re.sub(r'(\w+):', r'"\1":', json_text)
+        try:
+            data = json.loads(repaired)
+        except Exception:
+            return None
+    # validate
+    score = int(max(0, min(100, int(data.get("score", 50)))))
+    evidence = data.get("evidence", [])
+    confidence = float(max(0.0, min(1.0, float(data.get("confidence", 0.5)))))
+    return {"model_score": score, "evidence": evidence, "confidence": confidence}
 
-# =======================================
-# COMBINED STRESS SCORE
-# =======================================
+# -------------------------
+# Combined scoring (Balanced - Option B)
+# -------------------------
+def get_stress_level(user_text, model_id):
+    """
+    Combine three signals:
+      - model structured JSON (score + confidence)
+      - lexicon score (rule-based)
+      - deep reasoning intensity (intensity + confidence)
+    Balanced weights (B):
+      - model_structured_weight_base = 0.45
+      - lexicon_weight_base = 0.30
+      - reasoning_weight_base = 0.25
+    We adapt weights if confidences are low.
+    """
+    lex = lexicon_score(user_text)
 
-def get_stress_level(text):
-    lex = lexicon_score(text)
-    structured = ask_model_for_structured_stress(text)
-    reasoning = ask_model_for_intensity(text)
+    # ask for structured model score
+    structured = ask_model_for_structured_stress(user_text, model_id)
+    reasoning = ask_model_for_intensity(user_text, model_id)
 
     # defaults
-    model_score = structured["model_score"] if structured else 50
-    reasoning_score = reasoning["intensity"] if reasoning else model_score
+    model_score = None
+    model_conf = 0.0
+    reasoning_score = None
+    reasoning_conf = 0.0
 
-    final = int(0.45 * model_score + 0.30 * lex + 0.25 * reasoning_score)
-    return max(0, min(100, final))
+    if structured:
+        model_score = structured["model_score"]
+        model_conf = structured.get("confidence", 0.5)
+    if reasoning:
+        reasoning_score = reasoning["intensity"]
+        reasoning_conf = reasoning.get("confidence", 0.5)
 
-# =======================================
-# SUPPORT PROMPT
-# =======================================
+    # set base weights for Option B (balanced)
+    w_model_base = 0.45
+    w_lex_base = 0.30
+    w_reason_base = 0.25
 
+    # adapt weights by reported confidences (if absent, shift weight to lexicon)
+    model_conf_factor = model_conf if model_conf is not None else 0.0
+    reason_conf_factor = reasoning_conf if reasoning_conf is not None else 0.0
+
+    # If model and reasoning both present, scale by their confidences
+    w_model = w_model_base * (0.5 + 0.5 * model_conf_factor)
+    w_reason = w_reason_base * (0.5 + 0.5 * reason_conf_factor)
+    # give lexicon remaining weight but ensure minimum
+    w_lex = 1.0 - (w_model + w_reason)
+    if w_lex < 0.1:
+        w_lex = 0.1
+        total = w_model + w_reason + w_lex
+        w_model /= total
+        w_reason /= total
+        w_lex /= total
+
+    # fallback handling
+    # if model_score missing -> rely more on lexicon
+    if model_score is None:
+        w_model = 0.0
+        w_lex = 0.75
+        w_reason = 0.25
+    if reasoning_score is None:
+        # re-normalize between model and lex
+        if model_score is None:
+            w_reason = 0.0
+        else:
+            # move its weight into model/lex proportionally
+            w_model += w_reason * 0.6
+            w_lex += w_reason * 0.4
+            w_reason = 0.0
+
+    # prepare numeric signals
+    ms = model_score if model_score is not None else 50
+    rs = reasoning_score if reasoning_score is not None else ms  # use model if reasoning absent
+
+    final = int(round(ms * w_model + lex * w_lex + rs * w_reason))
+    final = max(0, min(100, final))
+
+    meta = {
+        "model_score": ms if model_score is not None else None,
+        "model_conf": model_conf if model_score is not None else None,
+        "lex_score": lex,
+        "reasoning_score": rs if reasoning_score is not None else None,
+        "weights": {"model": round(w_model, 3), "lex": round(w_lex, 3), "reason": round(w_reason, 3)}
+    }
+    return final, meta
+
+def get_stress_desc(level):
+    if level < 25: return "😌 Minimal Stress — You seem calm."
+    if level < 50: return "🙂 Mild Stress — Manageable tension."
+    if level < 75: return "😟 Moderate Stress — Consider coping tools."
+    return "😰 High Stress — Strong distress detected."
+
+# -------------------------
+# Support message builder (more specific)
+# -------------------------
 def build_support_prompt(mode, text):
     return f"""
-You are an empathetic mental‑health assistant.
-Use user's wording. Give **specific**, non‑generic advice.
+You are a deeply empathetic professional mental-health assistant.
+Use the user's exact phrases where relevant. Be specific and avoid generic stock responses.
+
+User text:
+{text}
 
 Mode: {mode}
-User: {text}
 
-Structure:
-1. Personalized validation
-2. 4 specific coping actions
-3. 12–24 hr plan
-4. One‑sentence help‑seeking script
-5. Warning signs
+Produce a structured response in Markdown with these sections:
+- Brief personalized validation (quote exact phrases)
+- 4 tailored coping actions (why each helps for this user)
+- Immediate 12–24 hour plan (3 items)
+- How to phrase asking for help to a loved one (one-sentence script)
+- Warning signs to monitor and when to seek professional help
 
-Include this disclaimer:
+End with the exact disclaimer block (do not vary):
 ----------------------------------------
-⚠ Important Disclaimer
-This AI may be inaccurate. Please seek medical advice.
-Indian Mental Health Helpline: 1800-599-0019
+⚠ **Important Disclaimer**
+This AI may be inaccurate. Please seek medical advice from a professional.  
+Talk to your loved ones for support.  
+**Indian Mental Health Helpline:** 1800-599-0019
 ----------------------------------------
 """
 
-# =======================================
-# (UI CODE CONTINUES — unchanged layout...)
-# You can continue editing or I will extend this file further.
-# --- END OF FILE (PART 1) ---
+# -------------------------
+# UI HEADER (unchanged)
+# -------------------------
+st.markdown("""
+<div class="main-header">
+    <h1>🧠 Mental Health AI</h1>
+    <p>Premium stress detector & crisis support tool</p>
+</div>
+""", unsafe_allow_html=True)
+
+# QUOTES (unchanged)
+st.markdown("""
+<div style="
+    background:rgba(49,24,94,0.55);
+    padding:1rem 1.4rem;
+    border-radius:14px;
+    color:#e8d6ff;
+    margin-top:-1rem;
+    margin-bottom:1.5rem;
+    box-shadow:0 4px 14px #31185e50;
+    font-size:0.95rem;
+    font-style:italic;">
+“If you're going through hell, keep going.”<br>
+“If there is something that means a lot to you, do not postpone it.”
+</div>
+""", unsafe_allow_html=True)
+
+# -------------------------
+# SIDEBAR (unchanged labels)
+# -------------------------
+with st.sidebar:
+    st.write("## Settings")
+    chosen_model_name = st.selectbox("Choose AI Model", SIDEBAR_MODEL_KEYS, index=1)
+    model_id = MODEL_NAMES[chosen_model_name]
+    mode = st.radio("Analysis Mode", ["Crisis Detection", "Emotional Support", "Risk Assessment"])
+    st.write("### Emergency Resources")
+    st.info("**KIRAN:** 1800-599-0019\n**Vandrevala:** 1860-2662-345\n**iCall:** 9152987821")
+
+# -------------------------
+# MAIN UI (unchanged layout)
+# -------------------------
+col1, col2 = st.columns([2, 1])
+
+with col1:
+    tab1, tab2 = st.tabs(["✍️ Text", "🎤 Voice"])
+    input_text = ""
+
+    with tab1:
+        st.markdown('<div class="info-card"><h3>Write your feelings</h3>', unsafe_allow_html=True)
+        input_text = st.text_area("Describe your feelings.", height=160)
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    with tab2:
+        st.markdown('<div class="info-card"><h3>Speak your mind</h3>', unsafe_allow_html=True)
+        audio_data = mic_recorder(start_prompt="🎤 Start Recording", stop_prompt="⏹ Stop")
+        if audio_data:
+            st.audio(audio_data["bytes"], format="audio/wav")
+            st.success("Voice recorded! (Type a summary in text box for analysis.)")
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    if st.button("🔍 Analyze & Get Support", use_container_width=True) and input_text.strip():
+        with st.spinner("Analyzing..."):
+            final_level, meta = get_stress_level(input_text, model_id)
+
+            st.markdown(f"""
+            <div class="stress-meter-container">
+                <div class="circular-gauge">
+                    <div class="gauge-inner">
+                        <div class="stress-percentage">{final_level}%</div>
+                        <div class="stress-label">Stress</div>
+                    </div>
+                </div>
+                <div style="color:#bb86fc;margin-top:10px;">{get_stress_desc(final_level)}</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            # Build a specific support prompt and generate answer (safe)
+            support_prompt = build_support_prompt(mode, input_text)
+            response = safe_generate(model_id, support_prompt)
+
+            st.markdown('<div class="response-area">', unsafe_allow_html=True)
+            if response:
+                st.markdown("### AI Support\n" + response.text)
+            else:
+                # offline fallback: give structured helpful fallback message
+                fallback_text = f"""
+### AI Support (Fallback)
+- **Validation:** I hear that you're saying: "{input_text[:120]}..." — that sounds distressing and important.
+- **Immediate steps (tailored):**
+  1. Take 3 minutes of diaphragmatic breathing (inhale 4s, hold 4s, exhale 6s).
+  2. Write the single most urgent problem and one tiny step you can take now.
+  3. Reach out to one trusted person with this exact line: "I need to talk — I haven't been okay lately."
+- **12–24 hour plan:** sleep hygiene, short walk outside, limit caffeine, connect with someone.
+- **When to seek help:** if you have thoughts of harming yourself, call a helpline immediately.
+----------------------------------------
+⚠ **Important Disclaimer**
+This AI may be inaccurate. Please seek medical advice from a professional.  
+Talk to your loved ones for support.  
+**Indian Mental Health Helpline:** 1800-599-0019
+----------------------------------------
+"""
+                st.markdown(fallback_text)
+            st.markdown('</div>', unsafe_allow_html=True)
+
+with col2:
+    st.markdown('<div class="info-card"><h3>Why Mindful?</h3>- Modern\n- Gemini 2.5 models\n- 24/7 support</div>', unsafe_allow_html=True)
+    st.markdown('<div class="info-card"><h3>Modes</h3>- Crisis Detection\n- Emotional Support\n- Risk Assessment</div>', unsafe_allow_html=True)
+    st.markdown('<div class="emergency-banner">🚨 IN CRISIS? CALL KIRAN 1800-599-0019 🚨</div>', unsafe_allow_html=True)
+
+# Footer (unchanged)
+st.markdown("---")
+st.markdown("""
+<div class="footer-dark">
+<p><strong>Disclaimer:</strong> This tool does not replace professional help.
+If you are in crisis, contact emergency services or the KIRAN helpline (1800-599-0019).</p>
+</div>
+""", unsafe_allow_html=True)
