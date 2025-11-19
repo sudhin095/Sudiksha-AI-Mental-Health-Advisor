@@ -318,7 +318,7 @@ with col1:
             with st.spinner("🤔 Analyzing your message with empathy and care..."):
                 try:
                     # Configure the model
-                    model = genai.GenerativeModel('gemini-pro')
+                    model = genai.GenerativeModel('gemini-1.5-flash-latest')
                     
                     # Create problem-specific prompt based on mode
                     if analysis_mode == "Crisis Detection":
@@ -447,3 +447,4 @@ st.markdown("""
     <p>💜 Built with care for mental health awareness</p>
 </div>
 """, unsafe_allow_html=True)
+
