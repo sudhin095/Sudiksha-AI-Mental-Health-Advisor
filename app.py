@@ -47,10 +47,10 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ====== Supported models (as validated for generateContent) ======
+# ====== FIXED MODEL NAMES (working models) ======
 MODEL_NAMES = {
-    "Gemini 1.5 Pro (latest)": "gemini-1.5-pro-latest",
-    "Gemini 1.5 Flash (latest)": "gemini-1.5-flash-latest"
+    "Gemini 2.5 Pro": "models/gemini-2.5-pro",
+    "Gemini 2.5 Flash": "models/gemini-2.5-flash"
 }
 SIDEBAR_MODEL_KEYS = list(MODEL_NAMES.keys())
 
@@ -171,7 +171,7 @@ with col1:
             st.markdown('</div>', unsafe_allow_html=True)
 
 with col2:
-    st.markdown('<div class="info-card"><h3>Why Mindful?</h3>- Modern, safe, and confidential\n- Gemini 1.5 AI models\n- 24/7 crisis guidance\n- Attractive for school projects</div>', unsafe_allow_html=True)
+    st.markdown('<div class="info-card"><h3>Why Mindful?</h3>- Modern, safe, and confidential\n- Gemini 2.5 AI models\n- 24/7 crisis guidance\n- Attractive for school projects</div>', unsafe_allow_html=True)
     st.markdown('<div class="info-card"><h3>Modes</h3>- Crisis Detection\n- Emotional Support\n- Risk Assessment</div>', unsafe_allow_html=True)
     st.markdown('<div class="emergency-banner">🚨 IN CRISIS? CALL KIRAN 1800-599-0019 🚨</div>', unsafe_allow_html=True)
 
@@ -179,6 +179,6 @@ st.markdown('---')
 st.markdown("""
 <div class="footer-dark">
     <p><strong>Disclaimer:</strong> This tool does not replace professional help. If you are in crisis, contact emergency services or the KIRAN helpline (1800-599-0019).</p>
-    <p>Premium Mental Health Support — Powered by Gemini 1.5</p>
+    <p>Premium Mental Health Support — Powered by Gemini 2.5</p>
 </div>
 """, unsafe_allow_html=True)
