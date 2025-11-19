@@ -21,7 +21,7 @@ except ImportError:
 # --- Page Config ---
 st.set_page_config(page_title="Mindful AI — Dark Mode", page_icon="🧠", layout="centered")
 
-# --- Aesthetic Dark Theme CSS ---
+# --- Aesthetic Dark Theme CSS from dark-mental-health-app.py ---
 st.markdown(
     """
     <style>
@@ -45,7 +45,7 @@ st.markdown(
         font-family: 'Inter', sans-serif;
     }
     
-    /* --- MAIN CARD LAYOUT --- */
+    /* --- MAIN CARD LAYOUT (adapted from your original structure) --- */
     .card {
         background: rgba(26, 26, 46, 0.85);
         padding: 32px;
@@ -76,7 +76,12 @@ st.markdown(
         margin-bottom: 24px;
         font-size: 16px;
     }
-    
+
+    h3 {
+        color: var(--glow-cyan);
+        font-weight: 600;
+    }
+
     /* --- INTERACTIVE ELEMENTS --- */
     .stButton > button {
         background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
@@ -96,6 +101,20 @@ st.markdown(
         transform: translateY(-3px) scale(1.03);
         box-shadow: 0 8px 30px rgba(187, 134, 252, 0.7), 0 0 25px rgba(0, 255, 245, 0.4);
         background: linear-gradient(135deg, #764ba2 0%, #667eea 100%);
+    }
+
+    .stTextArea textarea {
+        border-radius: 15px !important;
+        border: 2px solid var(--glow-purple) !important;
+        background-color: #1a1a2e !important;
+        color: #e0e0e0 !important;
+        font-size: 1.05rem !important;
+        padding: 1.2rem !important;
+    }
+    
+    .stTextArea textarea:focus {
+        border-color: var(--glow-cyan) !important;
+        box-shadow: 0 0 20px rgba(0, 255, 255, 0.5) !important;
     }
     
     .stTabs [data-baseweb="tab-list"] {
@@ -154,7 +173,7 @@ st.markdown(
         display: flex;
         flex-direction: column;
         align-items: center;
-        margin-top: 16px;
+        margin-top: 24px;
         margin-bottom: 24px;
     }
     .circular-gauge {
@@ -195,11 +214,9 @@ st.markdown(
         text-transform: uppercase;
         letter-spacing: 1.5px;
     }
-    
     </style>
     """, unsafe_allow_html=True
 )
-
 
 # --- Helpers and Model Loading (Your original logic is preserved) ---
 @st.cache_resource
@@ -256,7 +273,7 @@ def transcribe_with_whisper(file_bytes):
         f.write(file_bytes)
         tmp = f.name
     try:
-        res = model.transcribe(tmp, fp16=False) # fp16=False can improve CPU performance
+        res = model.transcribe(tmp, fp16=False) # Using fp16=False can be better for CPU
         return res.get("text", "").strip()
     finally:
         try: os.remove(tmp)
@@ -267,12 +284,15 @@ st.markdown('<div class="card">', unsafe_allow_html=True)
 st.markdown('<div class="title">MINDFUL AI</div>', unsafe_allow_html=True)
 st.markdown('<div class="subtitle">A confidential AI partner to help you understand and navigate stress.</div>', unsafe_allow_html=True)
 
+# Use final_text_input to unify text from both tabs
+final_text_input = "" 
+
 tab1, tab2 = st.tabs(["✍️ TEXT ANALYSIS", "🎙️ AUDIO ANALYSIS"])
-final_text_input = ""
 
 with tab1:
     user_input_text = st.text_area("Share what you're feeling (write as much or as little as you like):", height=200, placeholder="e.g., I feel overwhelmed at work and can't focus...", label_visibility="collapsed")
-    final_text_input = user_input_text
+    if user_input_text:
+        final_text_input = user_input_text
 
 with tab2:
     st.info("Upload a short recording (wav/mp3/m4a). Transcription uses OpenAI's Whisper.")
@@ -284,15 +304,18 @@ with tab2:
                 with st.spinner("Transcribing audio... This may take a moment."):
                     try:
                         file_bytes = uploaded_file.read()
-                        transcribed_text = transcribe_with_whisper(file_bytes)
-                        st.session_state.transcribed_text = transcribed_text
+                        st.session_state.transcribed_text = transcribe_with_whisper(file_bytes)
                         st.success("Transcription complete!")
                     except Exception as e:
                         st.error(f"Transcription failed: {e}")
-            if "transcribed_text" in st.session_state:
-                 final_text_input = st.text_area("Transcribed text (edit if needed, then click Analyze):", value=st.session_state.transcribed_text, height=150)
         else:
             st.warning("Whisper is not installed on this server. Please transcribe locally and paste it in the Text tab.")
+
+    if "transcribed_text" in st.session_state:
+        transcribed_text_area = st.text_area("Transcribed text (edit if needed, then click Analyze):", value=st.session_state.transcribed_text, height=150)
+        if transcribed_text_area:
+            final_text_input = transcribed_text_area
+
 
 col1, col2 = st.columns([3, 2])
 with col1:
@@ -315,7 +338,7 @@ if analyze:
                 # --- Display new circular gauge ---
                 st.markdown(f"""
                 <div class="stress-meter-container">
-                    <div class="circular-gauge" style="background: conic-gradient(from 0deg, #00ff88 0%, #ffc107 {score-10}%, #ff6b6b {score}%, #1a1a2e {score+10}%, #1a1a2e 100%);">
+                    <div class="circular-gauge" style="background: conic-gradient(from 0deg, #00ff88 0%, #ffc107 {score-10}%, #ff6b6b {score}%, var(--dark-bg1) {score+5}%, var(--dark-bg1) 100%);">
                         <div class="gauge-inner">
                             <div class="stress-percentage">{score}%</div>
                             <div class="stress-label">Stress</div>
