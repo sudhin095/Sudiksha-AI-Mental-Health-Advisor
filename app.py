@@ -19,18 +19,48 @@ st.set_page_config(page_title="Premium Mental Health Stress Detector", page_icon
 st.markdown(
     """
     <style>
-        body { background-color: #f5f7fa; }
-        .main { background-color: #ffffff; padding: 30px; border-radius: 20px; }
-        .stTabs [data-baseweb="tab"] { font-size: 18px; font-weight: 600; }
-        .title-text { font-size: 40px; font-weight: 800; color: #2b5876; text-align: center; }
-        .subtitle { font-size: 18px; text-align: center; color: #4e4e4e; margin-bottom: 20px; }
-        .section-title { font-size: 22px; color: #1a3c6e; font-weight: 700; margin-top: 20px; }
-        .disclaimer-box {
-            background-color: #ffefef;
-            padding: 15px;
-            border-left: 6px solid #ff4d4d;
-            border-radius: 10px;
+        body {
+            background-color: #f0f4f8;
+        }
+        .main-container {
+            background: white;
+            padding: 40px;
+            border-radius: 25px;
+            box-shadow: 0 8px 25px rgba(0,0,0,0.12);
+            max-width: 900px;
+            margin: auto;
+            border: 1px solid #e6e6e6;
+        }
+        .title-text {
+            font-size: 48px;
+            font-weight: 900;
+            text-align: center;
+            background: linear-gradient(90deg, #2b5876, #4e4376);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            margin-bottom: 20px;
+        }
+        .subtitle-text {
+            font-size: 18px;
+            text-align: center;
+            color: #555;
+            margin-bottom: 30px;
+        }
+        .response-box {
+            background: #ffffff;
+            border-left: 6px solid #4e4376;
+            padding: 20px;
+            border-radius: 12px;
+            font-size: 17px;
+            line-height: 1.7;
+        }
+        .disclaimer {
             margin-top: 25px;
+            font-size: 15px;
+            color: #a80000 !important;
+            font-weight: 600;
+            border-top: 1px solid #ffb3b3;
+            padding-top: 15px;
         }
     </style>
     """,
