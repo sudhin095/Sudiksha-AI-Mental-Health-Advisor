@@ -1,677 +1,356 @@
+# app.py
+# Premium Mental Health Stress Detector (Streamlit)
+# - Text + audio (Whisper optional) input
+# - Stress percentage (0-100)
+# - Problem-specific, organized bullet responses
+# - Highlighted disclaimer + helpline 1800-599-0019 at bottom
+
 import streamlit as st
-from streamlit_mic_recorder import mic_recorder
-import google.generativeai as genai
-import os
+from transformers import pipeline
 import re
+import textwrap
+from io import BytesIO
 
-# =========================
-#  Gemini API Configuration
-# =========================
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+# Optional Whisper (local) for audio transcription
+try:
+    import whisper
+    WHISPER_AVAILABLE = True
+except ImportError:
+    WHISPER_AVAILABLE = False
 
-if not GEMINI_API_KEY:
-    st.error("⚠️ GEMINI_API_KEY not set! Please configure it in Streamlit secrets or environment variables.")
-    st.stop()
+# --- Page Config ---
+st.set_page_config(page_title="Mindful AI — Dark Mode", page_icon="🧠", layout="centered")
 
-genai.configure(api_key=GEMINI_API_KEY)
-
-# ================
-#  Page Config
-# ================
-st.set_page_config(
-    page_title="Mental Health AI - Dark Mode",
-    page_icon="🧠",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
-
-# ================
-#  Dark Theme Custom CSS
-# ================
-st.markdown("""
-<style>
+# --- Aesthetic Dark Theme CSS ---
+st.markdown(
+    """
+    <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&family=Space+Grotesk:wght@500;700&display=swap');
     
-    /* Global Dark Theme */
-    * {
+    /* --- ROOT VARIABLES --- */
+    :root {
+        --dark-bg1: #0f0c29;
+        --dark-bg2: #302b63;
+        --dark-bg3: #24243e;
+        --glow-cyan: #00fff5;
+        --glow-purple: #bb86fc;
+        --text-color: #e0e0e0;
+        --text-muted: #a8dadc;
+    }
+    
+    /* --- GLOBAL STYLES --- */
+    body {
+        background: linear-gradient(135deg, var(--dark-bg1) 0%, var(--dark-bg2) 50%, var(--dark-bg3) 100%);
+        color: var(--text-color);
         font-family: 'Inter', sans-serif;
     }
     
-    /* Main Dark Background */
-    .stApp {
-        background: linear-gradient(135deg, #0f0c29 0%, #302b63 50%, #24243e 100%);
-        color: #e0e0e0;
-    }
-    
-    /* Header with Neon Glow */
-    .main-header {
-        background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
-        padding: 2.5rem;
-        border-radius: 20px;
-        text-align: center;
-        margin-bottom: 2rem;
-        box-shadow: 0 10px 40px rgba(0, 255, 255, 0.3);
-        border: 2px solid rgba(0, 255, 255, 0.2);
-    }
-    
-    .main-header h1 {
-        color: #00fff5;
-        font-family: 'Space Grotesk', sans-serif;
-        font-size: 3.5rem;
-        font-weight: 700;
-        margin: 0;
-        text-shadow: 0 0 20px rgba(0, 255, 255, 0.8), 0 0 40px rgba(0, 255, 255, 0.4);
-        letter-spacing: 2px;
-    }
-    
-    .main-header p {
-        color: #a8dadc;
-        font-size: 1.3rem;
-        margin-top: 0.8rem;
-        font-weight: 300;
-    }
-    
-    /* Dark Cards with Glow */
-    .info-card {
+    /* --- MAIN CARD LAYOUT --- */
+    .card {
         background: rgba(26, 26, 46, 0.85);
-        padding: 2rem;
+        padding: 32px;
         border-radius: 20px;
-        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4), 0 0 20px rgba(138, 43, 226, 0.2);
-        margin-bottom: 1.5rem;
+        box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5), 0 0 30px rgba(187, 134, 252, 0.2);
         backdrop-filter: blur(15px);
-        border: 1px solid rgba(138, 43, 226, 0.3);
+        border: 1px solid rgba(187, 134, 252, 0.3);
+        max-width: 900px;
+        margin: 20px auto;
     }
     
-    .info-card h3 {
-        color: #bb86fc;
-        font-weight: 600;
-        margin-bottom: 1rem;
-        font-size: 1.4rem;
+    /* --- TYPOGRAPHY --- */
+    .title {
+        color: var(--glow-cyan);
+        font-family: 'Space Grotesk', sans-serif;
+        font-size: 38px;
+        font-weight: 700;
+        text-shadow: 0 0 15px rgba(0, 255, 245, 0.6), 0 0 30px rgba(0, 255, 245, 0.3);
+        letter-spacing: 1.5px;
+        text-align: center;
+        margin-bottom: 8px;
     }
     
-    /* Input Styling Dark */
-    .stTextArea textarea {
-        border-radius: 15px !important;
-        border: 2px solid #bb86fc !important;
-        background-color: #1a1a2e !important;
-        color: #e0e0e0 !important;
-        font-size: 1.05rem !important;
-        padding: 1.2rem !important;
+    .subtitle {
+        color: var(--text-muted);
+        text-align: center;
+        font-weight: 300;
+        margin-bottom: 24px;
+        font-size: 16px;
     }
     
-    .stTextArea textarea:focus {
-        border-color: #00fff5 !important;
-        box-shadow: 0 0 20px rgba(0, 255, 255, 0.5) !important;
-    }
-    
-    /* Neon Buttons */
+    /* --- INTERACTIVE ELEMENTS --- */
     .stButton > button {
         background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
         color: white;
-        border: 2px solid #bb86fc;
-        padding: 0.9rem 2.5rem;
+        border: 2px solid var(--glow-purple);
+        padding: 12px 28px;
         border-radius: 30px;
         font-weight: 700;
-        font-size: 1.15rem;
-        box-shadow: 0 5px 25px rgba(138, 43, 226, 0.5);
+        font-size: 16px;
+        box-shadow: 0 5px 20px rgba(187, 134, 252, 0.4);
         transition: all 0.3s ease;
-        width: 100%;
         text-transform: uppercase;
-        letter-spacing: 1.5px;
+        letter-spacing: 1px;
     }
     
     .stButton > button:hover {
-        transform: translateY(-3px) scale(1.02);
-        box-shadow: 0 10px 40px rgba(138, 43, 226, 0.8), 0 0 30px rgba(0, 255, 255, 0.5);
+        transform: translateY(-3px) scale(1.03);
+        box-shadow: 0 8px 30px rgba(187, 134, 252, 0.7), 0 0 25px rgba(0, 255, 245, 0.4);
         background: linear-gradient(135deg, #764ba2 0%, #667eea 100%);
     }
     
-    /* Response Area with Gradient Border */
-    .response-area {
-        background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
-        padding: 2.5rem;
-        border-radius: 20px;
-        box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5);
-        margin-top: 2rem;
-        border: 2px solid;
-        border-image: linear-gradient(135deg, #bb86fc, #00fff5) 1;
-    }
-    
-    .response-area h3 {
-        color: #00fff5;
-        font-weight: 700;
-        margin-bottom: 1.2rem;
-        font-size: 1.8rem;
-    }
-    
-    /* Dark Sidebar */
-    [data-testid="stSidebar"] {
-        background: linear-gradient(180deg, #0f0c29 0%, #302b63 100%);
-        border-right: 2px solid rgba(138, 43, 226, 0.3);
-    }
-    
-    [data-testid="stSidebar"] h1, 
-    [data-testid="stSidebar"] h2, 
-    [data-testid="stSidebar"] h3,
-    [data-testid="stSidebar"] p,
-    [data-testid="stSidebar"] label,
-    [data-testid="stSidebar"] .stMarkdown {
-        color: #e0e0e0 !important;
-    }
-    
-    /* Emergency Banner Dark */
-    .emergency-banner {
-        background: linear-gradient(135deg, #d32f2f 0%, #c2185b 100%);
-        color: white;
-        padding: 1.8rem;
-        border-radius: 20px;
-        text-align: center;
-        font-weight: 700;
-        margin-bottom: 1.5rem;
-        box-shadow: 0 5px 25px rgba(211, 47, 47, 0.6);
-        border: 2px solid rgba(255, 82, 82, 0.5);
-        font-size: 1.1rem;
-    }
-    
-    /* Animated Status Indicator */
-    .status-active {
-        display: inline-block;
-        width: 14px;
-        height: 14px;
-        background-color: #00ff88;
-        border-radius: 50%;
-        margin-right: 0.7rem;
-        animation: pulse-glow 2s infinite;
-        box-shadow: 0 0 10px #00ff88;
-    }
-    
-    @keyframes pulse-glow {
-        0%, 100% { 
-            opacity: 1;
-            box-shadow: 0 0 10px #00ff88;
-        }
-        50% { 
-            opacity: 0.6;
-            box-shadow: 0 0 20px #00ff88;
-        }
-    }
-    
-    /* Dark Tabs */
     .stTabs [data-baseweb="tab-list"] {
-        gap: 1.2rem;
+        gap: 16px;
         background-color: transparent;
     }
     
     .stTabs [data-baseweb="tab"] {
         background: rgba(26, 26, 46, 0.6);
-        border-radius: 12px;
-        color: #a8dadc;
+        border-radius: 10px;
+        color: var(--text-muted);
         font-weight: 600;
-        padding: 0.9rem 1.8rem;
-        border: 1px solid rgba(138, 43, 226, 0.3);
+        padding: 12px 20px;
+        border: 1px solid rgba(187, 134, 252, 0.3);
     }
     
     .stTabs [aria-selected="true"] {
         background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
         color: white;
-        border-color: #bb86fc;
-        box-shadow: 0 5px 20px rgba(138, 43, 226, 0.5);
+        border-color: var(--glow-purple);
+        box-shadow: 0 5px 15px rgba(187, 134, 252, 0.4);
     }
     
-    /* Loading Animation */
-    .stSpinner > div {
-        border-top-color: #00fff5 !important;
+    /* --- RESPONSE & DISCLAIMER --- */
+    .response {
+        background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+        padding: 24px;
+        border-radius: 15px;
+        margin-top: 24px;
+        border: 1px solid;
+        border-image: linear-gradient(135deg, var(--glow-purple), var(--glow-cyan)) 1;
     }
     
-    /* Dark Success/Warning/Error Messages */
-    .stSuccess {
-        background-color: rgba(0, 255, 136, 0.15);
-        border-left: 5px solid #00ff88;
-        border-radius: 12px;
-        color: #00ff88;
-    }
-    
-    .stWarning {
-        background-color: rgba(255, 193, 7, 0.15);
-        border-left: 5px solid #ffc107;
-        border-radius: 12px;
-        color: #ffc107;
-    }
-    
-    .stError {
-        background-color: rgba(244, 67, 54, 0.15);
-        border-left: 5px solid #f44336;
-        border-radius: 12px;
-        color: #ff6b6b;
-    }
-    
-    .stInfo {
-        background-color: rgba(0, 255, 245, 0.15);
-        border-left: 5px solid #00fff5;
-        border-radius: 12px;
-        color: #00fff5;
-    }
-    
-    /* Radio Buttons Dark */
-    .stRadio > label {
-        color: #e0e0e0 !important;
+    .disclaimer {
+        background: rgba(255, 184, 77, 0.1);
+        border-left: 6px solid #ffb84d;
+        padding: 16px;
+        border-radius: 10px;
+        margin-top: 24px;
         font-weight: 600;
+        color: #ffdd99;
     }
     
-    /* Select Box Dark */
-    .stSelectbox > label {
-        color: #e0e0e0 !important;
-        font-weight: 600;
+    .emergency {
+        background: linear-gradient(90deg, #f093fb, #f5576c);
+        color: white;
+        padding: 12px;
+        border-radius: 10px;
+        text-align: center;
+        font-weight: 700;
+        box-shadow: 0 5px 20px rgba(245, 87, 108, 0.5);
     }
     
-    /* ============================= */
-    /* STRESS METER - Circular Gauge */
-    /* ============================= */
+    /* --- CIRCULAR STRESS GAUGE --- */
     .stress-meter-container {
         display: flex;
         flex-direction: column;
         align-items: center;
-        margin: 2rem 0;
-        padding: 2rem;
-        background: rgba(26, 26, 46, 0.8);
-        border-radius: 20px;
-        border: 2px solid rgba(138, 43, 226, 0.4);
-        box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5);
+        margin-top: 16px;
+        margin-bottom: 24px;
     }
-    
-    .stress-meter-title {
-        color: #bb86fc;
-        font-size: 1.8rem;
-        font-weight: 700;
-        margin-bottom: 1.5rem;
-        text-transform: uppercase;
-        letter-spacing: 2px;
-    }
-    
     .circular-gauge {
         position: relative;
-        width: 250px;
-        height: 250px;
+        width: 180px;
+        height: 180px;
         border-radius: 50%;
         background: conic-gradient(
-            from 0deg,
-            #00ff88 0%,
-            #ffc107 33%,
-            #ff6b6b 66%,
+            #00ff88 0%, 
+            #ffc107 50%, 
+            #ff6b6b 75%, 
             #d32f2f 100%
         );
         display: flex;
         align-items: center;
         justify-content: center;
-        box-shadow: 0 0 40px rgba(138, 43, 226, 0.6);
     }
-    
     .gauge-inner {
-        width: 200px;
-        height: 200px;
+        width: 150px;
+        height: 150px;
         border-radius: 50%;
         background: #1a1a2e;
         display: flex;
         flex-direction: column;
         align-items: center;
         justify-content: center;
-        box-shadow: inset 0 0 20px rgba(0, 0, 0, 0.5);
+        box-shadow: inset 0 0 15px rgba(0, 0, 0, 0.5);
     }
-    
     .stress-percentage {
-        font-size: 4rem;
+        font-size: 42px;
         font-weight: 700;
-        color: #00fff5;
-        text-shadow: 0 0 20px rgba(0, 255, 255, 0.8);
-        line-height: 1;
+        color: var(--glow-cyan);
+        text-shadow: 0 0 10px rgba(0, 255, 245, 0.7);
     }
-    
     .stress-label {
-        font-size: 1.2rem;
-        color: #a8dadc;
-        margin-top: 0.5rem;
+        font-size: 14px;
+        color: var(--text-muted);
         text-transform: uppercase;
-        letter-spacing: 2px;
+        letter-spacing: 1.5px;
     }
     
-    .stress-description {
-        text-align: center;
-        color: #e0e0e0;
-        font-size: 1.1rem;
-        margin-top: 1.5rem;
-        padding: 1rem;
-        background: rgba(138, 43, 226, 0.1);
-        border-radius: 10px;
-        max-width: 400px;
-    }
+    </style>
+    """, unsafe_allow_html=True
+)
+
+
+# --- Helpers and Model Loading (Your original logic is preserved) ---
+@st.cache_resource
+def load_emotion_model():
+    return pipeline("text-classification", model="j-hartmann/emotion-english-distilroberta-base", return_all_scores=True)
+
+emotion_model = load_emotion_model()
+
+def compute_stress_score(model_scores):
+    prob = {item['label'].lower(): item['score'] for item in model_scores}
+    stress_raw = prob.get('anger', 0.0) + prob.get('fear', 0.0) + prob.get('sadness', 0.0) + prob.get('stress', 0.0)
+    return int(round(min(1.0, stress_raw) * 100))
+
+def extract_signals(text):
+    txt = text.lower()
+    feelings = ["anxious", "anxiety", "depressed", "depression", "sad", "hopeless", "overwhelmed", "stressed", "stress", "panic", "panic attack", "angry", "lonely", "isolated", "hurt", "frustrat", "burnout", "tired", "exhausted", "suicid", "worthless"]
+    triggers = ["work", "job", "exam", "relationship", "money", "family", "health", "loss", "breakup", "school", "boss", "study", "deadline"]
+    actions = [w for w in feelings if w in txt]
+    triggers_found = [t for t in triggers if t in txt]
+    serious = []
+    if re.search(r"\bkill myself\b|\bi want to die\b|\bi can\'t go on\b|\bi\'m going to end\b", txt): serious.append("suicidal_ideation")
+    if re.search(r"\bsleep(ing|s)?\b|\binsomnia\b", txt): serious.append("sleep_issue")
+    if re.search(r"\beat(ing|s)?\b|\bappetite\b", txt): serious.append("appetite_change")
+    return {"feelings": sorted(set(actions)), "triggers": triggers_found, "serious": serious}
+
+def make_personalized_response(text, score, signals):
+    excerpt = textwrap.shorten(text.replace("\n", " "), width=140, placeholder="...")
+    if score < 35: level = "LOW — mild or transient stress"
+    elif score < 65: level = "MODERATE — notable emotional strain"
+    else: level = "HIGH — elevated stress or distress"
     
-    /* Footer Dark */
-    .footer-dark {
-        text-align: center;
-        color: #a8dadc;
-        padding: 2rem;
-        background: rgba(15, 12, 41, 0.6);
-        border-radius: 15px;
-        margin-top: 3rem;
-        border: 1px solid rgba(138, 43, 226, 0.2);
-    }
-</style>
-""", unsafe_allow_html=True)
+    sections = [f"**Stress Assessment:** {level} based on your language patterns.", f"**What I hear from you:**\n- \"{excerpt}\""]
+    
+    if signals["feelings"]:
+        sections.append("**Emotional elements detected:**\n``````")
+    if signals["triggers"]:
+        sections.append(f"**Possible situational triggers:** {', '.join(signals['triggers'])}")
+    
+    suggestions = []
+    if any(w in text.lower() for w in ["anxious", "anxiety", "panic"]): suggestions.append("- Try *box breathing* (inhale 4s, hold 4s, exhale 4s, hold 4s) to find calm.")
+    if "sleep_issue" in signals["serious"] or "tired" in signals["feelings"]: suggestions.append("- For sleep, try a 30-min screen-free wind-down before bed.")
+    suggestions.append("- Use the *5-4-3-2-1 grounding technique* to connect with your surroundings.")
+    suggestions.append("- If you feel safe to do so, share one sentence about your feelings with a trusted person.")
+    if score >= 65 or "suicidal_ideation" in signals["serious"]: suggestions.append("- **Please consider contacting a crisis service. If you feel unsafe, call the helpline below immediately.**")
+    
+    sections.append("**Personalized Coping Suggestions:**\n" + "\n".join(suggestions))
+    sections.append("**What to watch for in the next 48 hours:**\n- Mood staying low or worsening\n- Changes in sleep or appetite\n- Any thoughts of self-harm")
+    return "\n\n".join(sections)
 
-# ======================
-#  Session State
-# ======================
-if "analysis_history" not in st.session_state:
-    st.session_state.analysis_history = []
-if "stress_level" not in st.session_state:
-    st.session_state.stress_level = 0
-
-# ======================
-#  Helper Functions
-# ======================
-def get_stress_level(text, model_name):
-    """Extract stress percentage from text using Gemini."""
+def transcribe_with_whisper(file_bytes):
+    model = whisper.load_model("small")
+    import tempfile, os
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as f:
+        f.write(file_bytes)
+        tmp = f.name
     try:
-        model = genai.GenerativeModel(model_name)
-        prompt = f"""You are a mental health AI analyzing stress levels. Based on the following text, provide ONLY a single integer number between 0 and 100 representing the stress percentage. 
+        res = model.transcribe(tmp, fp16=False) # fp16=False can improve CPU performance
+        return res.get("text", "").strip()
+    finally:
+        try: os.remove(tmp)
+        except Exception: pass
 
-0 = No stress/calm
-25 = Mild stress
-50 = Moderate stress
-75 = High stress
-100 = Extreme stress/crisis
+# --- App layout ---
+st.markdown('<div class="card">', unsafe_allow_html=True)
+st.markdown('<div class="title">MINDFUL AI</div>', unsafe_allow_html=True)
+st.markdown('<div class="subtitle">A confidential AI partner to help you understand and navigate stress.</div>', unsafe_allow_html=True)
 
-Respond with ONLY the number, nothing else.
+tab1, tab2 = st.tabs(["✍️ TEXT ANALYSIS", "🎙️ AUDIO ANALYSIS"])
+final_text_input = ""
 
-Text to analyze: '{text}'"""
-        
-        response = model.generate_content(prompt)
-        match = re.search(r'\d+', response.text)
-        if match:
-            stress_val = int(match.group(0))
-            return min(100, max(0, stress_val))  # Clamp between 0-100
-        return 50  # Default to moderate if parsing fails
-    except Exception as e:
-        st.warning(f"Stress calculation warning: {e}")
-        return 50
+with tab1:
+    user_input_text = st.text_area("Share what you're feeling (write as much or as little as you like):", height=200, placeholder="e.g., I feel overwhelmed at work and can't focus...", label_visibility="collapsed")
+    final_text_input = user_input_text
 
-def get_stress_description(level):
-    """Return description based on stress level."""
-    if level < 25:
-        return "😌 Minimal Stress - You seem relatively calm and balanced."
-    elif level < 50:
-        return "😐 Mild Stress - Some tension present but manageable."
-    elif level < 75:
-        return "😟 Moderate Stress - Noticeable stress that needs attention."
-    else:
-        return "😰 High Stress - Significant distress detected. Please seek support."
+with tab2:
+    st.info("Upload a short recording (wav/mp3/m4a). Transcription uses OpenAI's Whisper.")
+    uploaded_file = st.file_uploader("Upload audio file", type=["wav", "mp3", "m4a", "ogg"], label_visibility="collapsed")
+    if uploaded_file is not None:
+        st.audio(uploaded_file)
+        if WHISPER_AVAILABLE:
+            if st.button("Transcribe Audio for Analysis"):
+                with st.spinner("Transcribing audio... This may take a moment."):
+                    try:
+                        file_bytes = uploaded_file.read()
+                        transcribed_text = transcribe_with_whisper(file_bytes)
+                        st.session_state.transcribed_text = transcribed_text
+                        st.success("Transcription complete!")
+                    except Exception as e:
+                        st.error(f"Transcription failed: {e}")
+            if "transcribed_text" in st.session_state:
+                 final_text_input = st.text_area("Transcribed text (edit if needed, then click Analyze):", value=st.session_state.transcribed_text, height=150)
+        else:
+            st.warning("Whisper is not installed on this server. Please transcribe locally and paste it in the Text tab.")
 
-# ================
-#  Header
-# ================
-st.markdown("""
-<div class="main-header">
-    <h1>🧠 MENTAL HEALTH AI</h1>
-    <p><span class="status-active"></span>Advanced Crisis Detection & Support System</p>
-</div>
-""", unsafe_allow_html=True)
-
-# ================
-#  Sidebar
-# ================
-with st.sidebar:
-    st.markdown("## ⚙️ SETTINGS")
-    
-    # Model Selection
-    gemini_model = st.selectbox(
-        "🤖 Select Gemini Model:",
-        ("gemini-1.5-flash-latest", "gemini-1.5-pro-latest"),
-        help="Flash: Faster response | Pro: More powerful analysis"
-    )
-    
-    st.markdown("---")
-    
-    # Analysis Mode
-    analysis_mode = st.radio(
-        "📊 Analysis Mode:",
-        ["Crisis Detection", "Emotional Support", "Risk Assessment"],
-        help="Choose the type of analysis you need"
-    )
-    
-    st.markdown("---")
-    
-    # Emergency Contacts
-    st.markdown("### 🚨 EMERGENCY RESOURCES")
-    st.markdown("""
-**24/7 Helplines (India):**
-- 🆘 **KIRAN:** 1800-599-0019
-- 💬 **Vandrevala:** 1860-2662-345
-- 📞 **iCall:** 9152987821
-    """)
-    
-    st.markdown("---")
-    
-    # How to Use
-    with st.expander("💡 HOW TO USE"):
-        st.markdown("""
-1. Select your preferred Gemini model
-2. Choose an analysis mode
-3. Type or record your message
-4. Click 'Analyze' to get insights
-5. Review stress meter & guidance
-        """)
-    
-    # Analysis History
-    if st.session_state.analysis_history:
-        st.markdown("---")
-        st.markdown("### 📈 SESSION STATS")
-        st.info(f"Analyses: {len(st.session_state.analysis_history)}")
-
-# ================
-#  Main Content
-# ================
-col1, col2 = st.columns([2, 1])
-
+col1, col2 = st.columns([3, 2])
 with col1:
-    # Input Tabs
-    tab1, tab2 = st.tabs(["✍️ TEXT INPUT", "🎤 VOICE INPUT"])
-    
-    with tab1:
-        st.markdown('<div class="info-card">', unsafe_allow_html=True)
-        st.markdown("### Express Your Thoughts")
-        user_text = st.text_area(
-            "Share what's on your mind...",
-            height=220,
-            placeholder="Type your thoughts, feelings, or concerns here. All conversations are confidential.",
-            label_visibility="collapsed",
-            key="text_input"
-        )
-        st.markdown('</div>', unsafe_allow_html=True)
-    
-    with tab2:
-        st.markdown('<div class="info-card">', unsafe_allow_html=True)
-        st.markdown("### Record Your Voice")
-        st.info("🎙️ Click below to record. Speak clearly and take your time.")
-        
-        audio_data = mic_recorder(
-            start_prompt="🎤 START RECORDING",
-            stop_prompt="⏹️ STOP RECORDING",
-            just_once=False,
-            use_container_width=True,
-            key='mic_recorder'
-        )
-        
-        if audio_data is not None:
-            st.success("✅ Recording captured successfully!")
-            st.audio(audio_data['bytes'], format='audio/wav')
-            st.info("💡 **Next Step:** Transcribe this audio or type a summary in the Text Input tab for AI analysis. You can integrate speech-to-text APIs for automatic transcription.")
-        
-        st.markdown('</div>', unsafe_allow_html=True)
-    
-    # Analyze Button
-    if st.button("🔍 ANALYZE & GET SUPPORT", use_container_width=True):
-        if user_text.strip():
-            # Placeholders
-            stress_placeholder = st.empty()
-            analysis_placeholder = st.empty()
-            
-            with st.spinner("🤔 Analyzing your message with AI-powered empathy..."):
-                # Step 1: Calculate Stress Level
-                stress_level = get_stress_level(user_text, gemini_model)
-                st.session_state.stress_level = stress_level
-                
-                # Display Stress Meter
-                stress_desc = get_stress_description(stress_level)
-                stress_placeholder.markdown(f"""
+    analyze = st.button("🔍 Analyze & Get Support", use_container_width=True)
+with col2:
+    st.markdown("<div class='emergency'>In Crisis? Call 1800-599-0019</div>", unsafe_allow_html=True)
+
+if analyze:
+    final_text = final_text_input.strip()
+    if not final_text:
+        st.warning("Please enter some text or transcribe an audio file first.")
+    else:
+        with st.spinner("Analyzing language patterns for stress markers..."):
+            try:
+                raw_scores = emotion_model(final_text)[0]
+                score = compute_stress_score(raw_scores)
+                signals = extract_signals(final_text)
+                response_md = make_personalized_response(final_text, score, signals)
+
+                # --- Display new circular gauge ---
+                st.markdown(f"""
                 <div class="stress-meter-container">
-                    <div class="stress-meter-title">STRESS ANALYSIS</div>
-                    <div class="circular-gauge">
+                    <div class="circular-gauge" style="background: conic-gradient(from 0deg, #00ff88 0%, #ffc107 {score-10}%, #ff6b6b {score}%, #1a1a2e {score+10}%, #1a1a2e 100%);">
                         <div class="gauge-inner">
-                            <div class="stress-percentage">{stress_level}%</div>
-                            <div class="stress-label">STRESS</div>
+                            <div class="stress-percentage">{score}%</div>
+                            <div class="stress-label">Stress</div>
                         </div>
                     </div>
-                    <div class="stress-description">{stress_desc}</div>
                 </div>
                 """, unsafe_allow_html=True)
                 
-                # Step 2: Detailed Analysis
-                try:
-                    model = genai.GenerativeModel(gemini_model)
-                    
-                    # Build mode-specific prompts
-                    if analysis_mode == "Crisis Detection":
-                        prompt = f"""You are a compassionate mental health crisis detection AI. Analyze the following message for crisis indicators and provide problem-specific guidance.
+                # --- Display response ---
+                st.markdown('<div class="response">', unsafe_allow_html=True)
+                st.markdown(response_md)
+                st.markdown('</div>', unsafe_allow_html=True)
 
-**User Message:**
-"{user_text}"
+                if "history" not in st.session_state: st.session_state.history = []
+                st.session_state.history.insert(0, {"text": final_text[:80], "score": score})
+                
+                report = f"Mindful AI — Stress Report\n\nInput excerpt: {final_text[:300]}...\nStress score: {score}%\n\n{response_md}\n\nHelpline: 1800-599-0019"
+                st.download_button("Download Report (.txt)", report, file_name="mindful_ai_report.txt")
 
-**Provide a detailed response with these sections:**
+            except Exception as e:
+                st.error(f"An error occurred during analysis: {e}")
 
-1. **Crisis Level Assessment**: Rate as LOW/MODERATE/HIGH/CRITICAL with clear reasoning
-2. **Key Concerns Identified**: Specific phrases or patterns indicating distress
-3. **Emotional State Analysis**: Describe the apparent emotional condition
-4. **Immediate Action Steps**: 3-5 specific, actionable recommendations
-5. **Support Resources**: Relevant helplines and resources for this specific situation
-6. **Follow-Up Guidance**: What to monitor and when to seek additional help
+if "history" in st.session_state and st.session_state.history:
+    st.markdown("<hr style='border-color: rgba(187, 134, 252, 0.2);' />", unsafe_allow_html=True)
+    st.markdown("#### Recent Analyses")
+    for h in st.session_state.history[:3]:
+        st.markdown(f"<div style='font-size:14px; color:var(--text-muted);'>- **{h['score']}%** — *{h['text']}...*</div>", unsafe_allow_html=True)
 
-Be empathetic, specific, and solution-focused. Address their exact concerns using their own words."""
-
-                    elif analysis_mode == "Emotional Support":
-                        prompt = f"""You are a warm, supportive mental health companion providing emotional support.
-
-**User Message:**
-"{user_text}"
-
-**Provide a compassionate response with:**
-
-1. **Validation**: Acknowledge their specific feelings and experiences
-2. **Understanding**: Show you understand their unique situation
-3. **Encouragement**: Provide hope tailored to their challenges
-4. **Coping Strategies**: 4-5 practical techniques for their situation
-5. **Self-Care Actions**: Immediate, doable steps they can take today
-6. **Growth Perspective**: Help reframe challenges as opportunities
-
-Be gentle, non-judgmental, and address what they specifically shared."""
-
-                    else:  # Risk Assessment
-                        prompt = f"""You are a mental health risk assessment specialist. Evaluate potential risks and provide structured guidance.
-
-**User Message:**
-"{user_text}"
-
-**Provide a comprehensive assessment:**
-
-1. **Risk Factors Present**: Specific concerning elements identified
-2. **Protective Factors**: Strengths and positive elements mentioned
-3. **Overall Risk Level**: Low / Moderate / High / Critical
-4. **Warning Signs**: Specific behaviors or thoughts to monitor
-5. **Safety Plan Components**: Tailored strategies for this person
-6. **Professional Help Indicators**: When and why to seek professional support
-7. **Support Network Actions**: How friends/family can help
-
-Be thorough, specific, and provide clear, actionable guidance."""
-                    
-                    response = model.generate_content(prompt)
-                    
-                    # Store in history
-                    st.session_state.analysis_history.append({
-                        'mode': analysis_mode,
-                        'input_preview': user_text[:80] + "..." if len(user_text) > 80 else user_text,
-                        'stress_level': stress_level
-                    })
-                    
-                    # Display Analysis
-                    analysis_placeholder.markdown(f'<div class="response-area">', unsafe_allow_html=True)
-                    st.markdown(f"### 💙 {analysis_mode} Results")
-                    st.markdown(response.text)
-                    st.markdown('</div>', unsafe_allow_html=True)
-                    
-                    # Action Buttons
-                    col_a, col_b, col_c = st.columns(3)
-                    with col_a:
-                        if st.button("🔄 NEW ANALYSIS"):
-                            st.rerun()
-                    with col_b:
-                        if st.button("💾 SAVE TO HISTORY"):
-                            st.success("✅ Analysis saved!")
-                    with col_c:
-                        if st.button("📞 EMERGENCY HELP"):
-                            st.info("👈 Check sidebar for emergency resources")
-                    
-                except Exception as e:
-                    st.error(f"⚠️ API Error: {str(e)}")
-                    st.info("""
-**Troubleshooting:**
-- Verify GEMINI_API_KEY is correctly set
-- Check your API quota and permissions
-- Ensure the model name is valid
-- Try switching between Flash and Pro models
-                    """)
-        else:
-            st.warning("⚠️ Please enter some text or record a message before analyzing.")
-
-with col2:
-    # Info Cards
-    st.markdown('<div class="info-card">', unsafe_allow_html=True)
-    st.markdown("### 🌟 YOU'RE NOT ALONE")
-    st.markdown("""
-- 🔒 **100% Confidential** AI analysis
-- 🌙 **24/7 Available** support
-- 👥 **Professional** crisis resources
-- 💜 **Compassionate** guidance
-- 🎯 **Problem-specific** insights
-    """)
-    st.markdown('</div>', unsafe_allow_html=True)
-    
-    st.markdown('<div class="info-card">', unsafe_allow_html=True)
-    st.markdown("### 📊 ANALYSIS MODES")
-    st.markdown("""
-**🚨 Crisis Detection**
-Identifies urgent concerns and provides immediate guidance.
-
-**💚 Emotional Support**
-Offers comfort, validation, and coping strategies.
-
-**⚠️ Risk Assessment**
-Evaluates safety factors and recommends next steps.
-    """)
-    st.markdown('</div>', unsafe_allow_html=True)
-    
-    # Emergency Banner
-    st.markdown("""
-    <div class="emergency-banner">
-        🚨 IN CRISIS? CALL NOW 🚨<br>
-        <strong>KIRAN HELPLINE</strong><br>
-        1800-599-0019
+st.markdown(
+    """
+    <div class="disclaimer">
+    ⚠️ This AI provides supportive guidance and is NOT a substitute for professional medical care. 
+    It is an informational tool only. If you are in crisis, please call the 24/7 helpline: <strong>1800-599-0019</strong>.
     </div>
-    """, unsafe_allow_html=True)
+    """, unsafe_allow_html=True
+)
 
-# Footer
-st.markdown("---")
-st.markdown("""
-<div class="footer-dark">
-    <p><strong>⚠️ DISCLAIMER:</strong> This AI tool provides supportive guidance but is NOT a replacement for professional mental health care. If you're experiencing a mental health crisis, please contact emergency services or a crisis helpline immediately.</p>
-    <p style="margin-top: 1rem; font-size: 0.95rem;">💜 Built with care for mental health awareness | Powered by Google Gemini AI</p>
-</div>
-""", unsafe_allow_html=True)
+st.markdown('</div>', unsafe_allow_html=True)
