@@ -406,11 +406,11 @@ streamlit run app.py
 ## Key Features
 
 -  **Text Input:** Describe your feelings directly
-- 🎤 **Voice Input:** Speak and auto-transcribe to text (using `speech_to_text`)
-- 🧠 **AI Analysis:** Combined stress scoring (model + lexicon + reasoning)
-- 📊 **Circular Gauge:** Real-time stress visualization
-- 💬 **Personalized Support:** Mode-specific guidance based on Gemini AI
-- 🚨 **Crisis Detection:** High-stress warning with emergency hotlines
+-  **Voice Input:** Speak and auto-transcribe to text (using `speech_to_text`)
+-  **AI Analysis:** Combined stress scoring (model + lexicon + reasoning)
+-  **Circular Gauge:** Real-time stress visualization
+-  **Personalized Support:** Mode-specific guidance based on Gemini AI
+-  **Crisis Detection:** High-stress warning with emergency hotlines
 
 ## Dependencies
 
@@ -424,4 +424,5 @@ streamlit run app.py
 - Voice transcription works best in quiet environments
 - Fallback support message if API fails
 - All analysis includes professional disclaimer
+
 
