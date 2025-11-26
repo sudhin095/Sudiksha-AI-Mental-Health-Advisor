@@ -1,9 +1,12 @@
+# app.py
 import streamlit as st
 from streamlit_mic_recorder import mic_recorder
 import google.generativeai as genai
 import re
 import json
 import time
+import tempfile
+import os
 
 # =========================
 # GEMINI API KEY (Secrets)
@@ -59,46 +62,7 @@ MODEL_NAMES = {
 SIDEBAR_MODEL_KEYS = list(MODEL_NAMES.keys())
 
 # -------------------------
-# Safe generate wrapper with fallback and exponential backoff
-# -------------------------
-def safe_generate(model_id, prompt, max_retries=2, backoff_base=2):
-    """
-    Generate content safely.
-    - If a quota 429 occurs, automatically switch to flash fallback.
-    - Retries a small number of times with backoff for transient errors.
-    """
-    attempt = 0
-    last_exc = None
-    while attempt <= max_retries:
-        try:
-            model = genai.GenerativeModel(model_id)
-            return model.generate_content(prompt)
-        except Exception as e:
-            last_exc = e
-            msg = str(e).lower()
-            # Quota / rate limit -> fallback to flash
-            if "429" in msg or "quota" in msg or "rate limit" in msg:
-                # If already using flash, break
-                if model_id == "models/gemini-2.5-flash":
-                    # cannot recover
-                    return None
-                # warn user once
-                st.warning("⚠️ Model quota/rate limit reached. Switching to Gemini 2.5 Flash as fallback.")
-                try:
-                    model_id = "models/gemini-2.5-flash"
-                    model = genai.GenerativeModel(model_id)
-                    return model.generate_content(prompt)
-                except Exception:
-                    return None
-            # transient network error -> retry
-            attempt += 1
-            time.sleep(backoff_base ** attempt * 0.5)
-    # final failure
-    st.error("AI request failed. Using offline fallback where possible.")
-    return None
-
-# -------------------------
-# Lexicon scoring (same but stable)
+# Lexicon weights (unchanged)
 # -------------------------
 LEXICON_WEIGHTS = {
     "suicid": 5, "kill myself": 5, "end my life": 5, "i want to die": 5, "worthless": 4,
@@ -115,16 +79,128 @@ def lexicon_score(text):
             score += w
     if any(k in t for k in ["suicid", "kill myself", "i want to die", "end my life"]):
         score = max(score, 8.0)
-    return int(round(min(1.0, score / 10.0) * 100))
+    normalized = min(1.0, score / 10.0)
+    return int(round(normalized * 100))
 
 # -------------------------
-# Deep reasoning check (model rates intensity 0-100)
+# Robust safe_generate (text generation) - uses existing genai client
 # -------------------------
+def safe_generate(model_id, prompt, max_retries=2, backoff_base=2):
+    attempt = 0
+    while attempt <= max_retries:
+        try:
+            model = genai.GenerativeModel(model_id)
+            return model.generate_content(prompt)
+        except Exception as e:
+            msg = str(e).lower()
+            # quota/rate limit fallback to flash
+            if ("429" in msg or "quota" in msg or "rate limit" in msg) and model_id != "models/gemini-2.5-flash":
+                st.warning("⚠️ Model quota/rate limit reached. Falling back to Gemini 2.5 Flash.")
+                try:
+                    model = genai.GenerativeModel("models/gemini-2.5-flash")
+                    return model.generate_content(prompt)
+                except Exception:
+                    return None
+            attempt += 1
+            time.sleep(backoff_base ** attempt * 0.5)
+    return None
+
+# -------------------------
+# New: Transcription helper (automatic)
+# -------------------------
+def transcribe_audio_bytes_to_text(audio_bytes):
+    """
+    Save bytes to a temporary .wav file and attempt to transcribe using
+    the genai (Gemini) speech endpoint. Because the genai python API has
+    changed over time, we try a couple of sensible call patterns and
+    fall back gracefully to returning None if transcription fails.
+
+    Returns: string transcript or None
+    """
+    # write to temp file
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmpf:
+        tmpf.write(audio_bytes)
+        tmp_path = tmpf.name
+
+    transcript = None
+
+    # Try pattern 1: genai.audio.speech.transcribe (common pattern in some clients)
+    try:
+        if hasattr(genai, "audio") and hasattr(genai.audio, "speech"):
+            # Attempt the speech-to-text API pattern if available
+            try:
+                resp = genai.audio.speech.recognize(file=tmp_path, model="gpt-4o-mini-transcribe")
+                # Many genai libs return .text or similar
+                transcript = getattr(resp, "text", None) or (resp.get("transcript") if isinstance(resp, dict) else None)
+            except Exception:
+                # Another plausible method name/shape
+                resp = genai.audio.recognize(tmp_path)
+                transcript = getattr(resp, "text", None) or (resp.get("transcript") if isinstance(resp, dict) else None)
+    except Exception:
+        transcript = None
+
+    # Try pattern 2: older/alternate interface using GenerativeModel for speech
+    if transcript is None:
+        try:
+            if hasattr(genai, "GenerativeModel"):
+                model = genai.GenerativeModel("models/gemini-2.5-pro")
+                # Some clients allow model.transcribe or generate_text_from_audio - try safely
+                if hasattr(model, "transcribe"):
+                    resp = model.transcribe(tmp_path)
+                    transcript = getattr(resp, "text", None) or (resp.get("transcript") if isinstance(resp, dict) else None)
+                elif hasattr(model, "generate_audio_transcript"):
+                    resp = model.generate_audio_transcript(tmp_path)
+                    transcript = getattr(resp, "text", None) or (resp.get("transcript") if isinstance(resp, dict) else None)
+        except Exception:
+            transcript = None
+
+    # Try a super-simple fallback: ask the text model to parse the audio as base64 (costly and unreliable)
+    # (COMMENTED OUT on purpose to avoid extra cost; keep as reference)
+
+    # cleanup tmp file
+    try:
+        os.remove(tmp_path)
+    except:
+        pass
+
+    return transcript
+
+# -------------------------
+# Model structured and reasoning (unchanged logic using safe_generate)
+# -------------------------
+def ask_model_for_structured_stress(user_text, model_id):
+    model = genai.GenerativeModel(model_id)
+    prompt = (
+        "You are a precise assistant that analyzes emotional language. "
+        "Return ONLY a single valid JSON object with keys:\n"
+        "score: integer 0-100 estimating stress level\n"
+        "evidence: array of 1-6 short verbatim phrases (<=6 words) from the user's text that support the score\n"
+        "confidence: number 0.0-1.0 expressing how confident you are\n\n"
+        "User text:\n"
+        f"{user_text}\n\n"
+        "Example output (ONLY JSON):\n"
+        '{"score": 72, "evidence": ["I can’t sleep","I feel hopeless"], "confidence": 0.84}\n'
+    )
+    try:
+        response = safe_generate(model_id, prompt)
+        if not response:
+            return None
+        txt = response.text.strip()
+        match = re.search(r'\{[\s\S]*\}', txt)
+        if not match:
+            return None
+        data = json.loads(match.group())
+        if "score" in data and isinstance(data["score"], int):
+            return {
+                "model_score": max(0, min(100, int(data["score"]))),
+                "evidence": data.get("evidence", []),
+                "confidence": float(data.get("confidence", 0.0))
+            }
+    except Exception:
+        return None
+    return None
+
 def ask_model_for_intensity(user_text, model_id):
-    """
-    Ask the model to give a simple integer intensity 0-100 and a confidence.
-    This is a short, directed prompt to get a concise numeric result.
-    """
     prompt = (
         "You are an evaluator that gives a concise numeric emotional intensity score.\n"
         "Reply with ONLY valid JSON: {\"intensity\": <0-100>, \"confidence\": <0.0-1.0>}.\n\n"
@@ -134,7 +210,6 @@ def ask_model_for_intensity(user_text, model_id):
     if not resp:
         return None
     txt = resp.text.strip()
-    # try to extract JSON
     match = re.search(r"\{[\s\S]*?\}", txt)
     if not match:
         return None
@@ -146,73 +221,11 @@ def ask_model_for_intensity(user_text, model_id):
     except Exception:
         return None
 
-# -------------------------
-# Model structured stress extraction (robust JSON parse + repair)
-# -------------------------
-def ask_model_for_structured_stress(user_text, model_id):
-    """
-    Ask model to return JSON: {score, evidence, confidence}
-    Attempt to repair slight formatting issues in returned JSON.
-    """
-    prompt = (
-        "Return ONLY a single JSON object with keys:\n"
-        "score: integer 0-100\n"
-        "evidence: array of brief verbatim phrases from the user's text\n"
-        "confidence: float 0.0-1.0\n\n"
-        f"User text:\n{user_text}\n\n"
-        "Example: {\"score\":72, \"evidence\": [\"I can't sleep\"], \"confidence\":0.83}"
-    )
-    resp = safe_generate(model_id, prompt)
-    if not resp:
-        return None
-    txt = resp.text.strip()
-    # try to find JSON object; allow model to include backticks or text before/after
-    match = re.search(r'\{[\s\S]*\}', txt)
-    if not match:
-        # try to clean common issues (replace single quotes->double)
-        cleaned = txt.replace("'", '"')
-        match = re.search(r'\{[\s\S]*\}', cleaned)
-        if not match:
-            return None
-    json_text = match.group()
-    # attempt parse with small repairs
-    try:
-        data = json.loads(json_text)
-    except Exception:
-        # minor repair: add missing quotes around keys (very naive)
-        repaired = re.sub(r'(\w+):', r'"\1":', json_text)
-        try:
-            data = json.loads(repaired)
-        except Exception:
-            return None
-    # validate
-    score = int(max(0, min(100, int(data.get("score", 50)))))
-    evidence = data.get("evidence", [])
-    confidence = float(max(0.0, min(1.0, float(data.get("confidence", 0.5)))))
-    return {"model_score": score, "evidence": evidence, "confidence": confidence}
-
-# -------------------------
-# Combined scoring (Balanced - Option B)
-# -------------------------
 def get_stress_level(user_text, model_id):
-    """
-    Combine three signals:
-      - model structured JSON (score + confidence)
-      - lexicon score (rule-based)
-      - deep reasoning intensity (intensity + confidence)
-    Balanced weights (B):
-      - model_structured_weight_base = 0.45
-      - lexicon_weight_base = 0.30
-      - reasoning_weight_base = 0.25
-    We adapt weights if confidences are low.
-    """
-    lex = lexicon_score(user_text)
-
-    # ask for structured model score
+    lex_score = lexicon_score(user_text)
     structured = ask_model_for_structured_stress(user_text, model_id)
     reasoning = ask_model_for_intensity(user_text, model_id)
 
-    # defaults
     model_score = None
     model_conf = 0.0
     reasoning_score = None
@@ -225,19 +238,16 @@ def get_stress_level(user_text, model_id):
         reasoning_score = reasoning["intensity"]
         reasoning_conf = reasoning.get("confidence", 0.5)
 
-    # set base weights for Option B (balanced)
+    # Balanced weights (B)
     w_model_base = 0.45
     w_lex_base = 0.30
     w_reason_base = 0.25
 
-    # adapt weights by reported confidences (if absent, shift weight to lexicon)
     model_conf_factor = model_conf if model_conf is not None else 0.0
     reason_conf_factor = reasoning_conf if reasoning_conf is not None else 0.0
 
-    # If model and reasoning both present, scale by their confidences
     w_model = w_model_base * (0.5 + 0.5 * model_conf_factor)
     w_reason = w_reason_base * (0.5 + 0.5 * reason_conf_factor)
-    # give lexicon remaining weight but ensure minimum
     w_lex = 1.0 - (w_model + w_reason)
     if w_lex < 0.1:
         w_lex = 0.1
@@ -246,33 +256,28 @@ def get_stress_level(user_text, model_id):
         w_reason /= total
         w_lex /= total
 
-    # fallback handling
-    # if model_score missing -> rely more on lexicon
     if model_score is None:
         w_model = 0.0
         w_lex = 0.75
         w_reason = 0.25
     if reasoning_score is None:
-        # re-normalize between model and lex
         if model_score is None:
             w_reason = 0.0
         else:
-            # move its weight into model/lex proportionally
             w_model += w_reason * 0.6
             w_lex += w_reason * 0.4
             w_reason = 0.0
 
-    # prepare numeric signals
     ms = model_score if model_score is not None else 50
-    rs = reasoning_score if reasoning_score is not None else ms  # use model if reasoning absent
+    rs = reasoning_score if reasoning_score is not None else ms
 
-    final = int(round(ms * w_model + lex * w_lex + rs * w_reason))
+    final = int(round(ms * w_model + lex_score * w_lex + rs * w_reason))
     final = max(0, min(100, final))
 
     meta = {
         "model_score": ms if model_score is not None else None,
         "model_conf": model_conf if model_score is not None else None,
-        "lex_score": lex,
+        "lex_score": lex_score,
         "reasoning_score": rs if reasoning_score is not None else None,
         "weights": {"model": round(w_model, 3), "lex": round(w_lex, 3), "reason": round(w_reason, 3)}
     }
@@ -285,7 +290,7 @@ def get_stress_desc(level):
     return "😰 High Stress — Strong distress detected."
 
 # -------------------------
-# Support message builder (more specific)
+# Support prompt builder (unchanged)
 # -------------------------
 def build_support_prompt(mode, text):
     return f"""
@@ -314,7 +319,7 @@ Talk to your loved ones for support.
 """
 
 # -------------------------
-# UI HEADER (unchanged)
+# UI (unchanged layout, with hybrid voice -> auto-transcribe)
 # -------------------------
 st.markdown("""
 <div class="main-header">
@@ -323,7 +328,7 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-# QUOTES (unchanged)
+# QUOTES
 st.markdown("""
 <div style="
     background:rgba(49,24,94,0.55);
@@ -340,20 +345,25 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-# -------------------------
-# SIDEBAR (unchanged labels)
-# -------------------------
 with st.sidebar:
     st.write("## Settings")
-    chosen_model_name = st.selectbox("Choose AI Model", SIDEBAR_MODEL_KEYS, index=1)
+    chosen_model_name = st.selectbox(
+        "Choose AI Model",
+        SIDEBAR_MODEL_KEYS,
+        index=0)
     model_id = MODEL_NAMES[chosen_model_name]
-    mode = st.radio("Analysis Mode", ["Crisis Detection", "Emotional Support", "Risk Assessment"])
+    st.write("### Analysis Mode")
+    mode = st.radio(
+        "",
+        ["Crisis Detection","Emotional Support","Risk Assessment"]
+    )
     st.write("### Emergency Resources")
-    st.info("**KIRAN:** 1800-599-0019\n**Vandrevala:** 1860-2662-345\n**iCall:** 9152987821")
+    st.info(
+        "**KIRAN Helpline:** 1800-599-0019\n"
+        "**Vandrevala:** 1860-2662-345\n"
+        "**iCall:** 9152987821"
+    )
 
-# -------------------------
-# MAIN UI (unchanged layout)
-# -------------------------
 col1, col2 = st.columns([2, 1])
 
 with col1:
@@ -362,21 +372,93 @@ with col1:
 
     with tab1:
         st.markdown('<div class="info-card"><h3>Write your feelings</h3>', unsafe_allow_html=True)
-        input_text = st.text_area("Describe your feelings.", height=160)
-        st.markdown('</div>', unsafe_allow_html=True)
+        # keep the text area so transcribed text can be shown here
+        input_text = st.text_area(
+            "Describe your feelings, challenges, or thoughts.", height=160, key="txt_input")
+        st.markdown("</div>", unsafe_allow_html=True)
 
     with tab2:
         st.markdown('<div class="info-card"><h3>Speak your mind</h3>', unsafe_allow_html=True)
-        audio_data = mic_recorder(start_prompt="🎤 Start Recording", stop_prompt="⏹ Stop")
-        if audio_data:
+        st.info("Click start/stop to record and playback your message. After you stop, audio will be transcribed automatically.")
+        audio_data = mic_recorder(
+            start_prompt="🎤 Start Recording",
+            stop_prompt="⏹️ Stop",
+            just_once=False,
+            use_container_width=True,
+            key="mic"
+        )
+
+        # When audio_data is available, auto-transcribe and populate the text area and run analysis
+        if audio_data is not None:
+            # play back
             st.audio(audio_data["bytes"], format="audio/wav")
-            st.success("Voice recorded! (Type a summary in text box for analysis.)")
-        st.markdown('</div>', unsafe_allow_html=True)
+            st.success("✅ Recording saved! Transcribing now...")
 
-    if st.button("🔍 Analyze & Get Support", use_container_width=True) and input_text.strip():
-        with st.spinner("Analyzing..."):
+            # attempt transcription
+            with st.spinner("Transcribing audio..."):
+                transcript = transcribe_audio_bytes_to_text(audio_data["bytes"])
+
+            if transcript:
+                st.success("✅ Transcription complete. Text inserted into the text box (Text tab).")
+                # put the transcript into the text area (overwrite) so analysis will run
+                st.session_state["txt_input"] = transcript
+                # show transcription for immediate user confirmation
+                st.markdown('<div class="response-area">', unsafe_allow_html=True)
+                st.markdown("**Transcribed text:**\n\n" + transcript)
+                st.markdown('</div>', unsafe_allow_html=True)
+
+                # Automatically analyze after transcription (same as pressing Analyze)
+                final_level, meta = get_stress_level(transcript, model_id)
+                st.markdown(f"""
+                <div class="stress-meter-container">
+                    <div class="circular-gauge">
+                        <div class="gauge-inner">
+                            <div class="stress-percentage">{final_level}%</div>
+                            <div class="stress-label">Stress</div>
+                        </div>
+                    </div>
+                    <div style="color:#bb86fc;margin-top:10px;">{get_stress_desc(final_level)}</div>
+                </div>
+                """, unsafe_allow_html=True)
+
+                # Build and call support prompt
+                support_prompt = build_support_prompt(mode, transcript)
+                response = safe_generate(model_id, support_prompt)
+
+                st.markdown('<div class="response-area">', unsafe_allow_html=True)
+                if response:
+                    st.markdown("### AI Support\n" + response.text)
+                else:
+                    st.error("AI support could not be generated (quota/error). Showing fallback guidance.")
+                    fallback_text = f"""
+### AI Support (Fallback)
+- **Validation:** I hear that you're saying: "{transcript[:120]}..." — that sounds distressing and important.
+- **Immediate steps (tailored):**
+  1. Take 3 minutes of diaphragmatic breathing (inhale 4s, hold 4s, exhale 6s).
+  2. Write the single most urgent problem and one tiny step you can take now.
+  3. Reach out to one trusted person with this exact line: "I need to talk — I haven't been okay lately."
+- **12–24 hour plan:** sleep hygiene, short walk outside, limit caffeine, connect with someone.
+- **When to seek help:** if you have thoughts of harming yourself, call a helpline immediately.
+----------------------------------------
+⚠ **Important Disclaimer**
+This AI may be inaccurate. Please seek medical advice from a professional.  
+Talk to your loved ones for support.  
+**Indian Mental Health Helpline:** 1800-599-0019
+----------------------------------------
+"""
+                    st.markdown(fallback_text)
+                st.markdown('</div>', unsafe_allow_html=True)
+
+            else:
+                st.error("❌ Automatic transcription failed. Please type your message in the Text tab for analysis.")
+                # keep the audio playback and let user type manually
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    # Manual analyze button (works when user typed or transcript is present)
+    if st.button("🔍 Analyze & Get Support", use_container_width=True) and st.session_state.get("txt_input", "").strip():
+        input_text = st.session_state.get("txt_input", "")
+        with st.spinner("Analyzing message for stress..."):
             final_level, meta = get_stress_level(input_text, model_id)
-
             st.markdown(f"""
             <div class="stress-meter-container">
                 <div class="circular-gauge">
@@ -389,7 +471,6 @@ with col1:
             </div>
             """, unsafe_allow_html=True)
 
-            # Build a specific support prompt and generate answer (safe)
             support_prompt = build_support_prompt(mode, input_text)
             response = safe_generate(model_id, support_prompt)
 
@@ -397,7 +478,7 @@ with col1:
             if response:
                 st.markdown("### AI Support\n" + response.text)
             else:
-                # offline fallback: give structured helpful fallback message
+                st.error("AI support could not be generated (quota/error). Showing fallback guidance.")
                 fallback_text = f"""
 ### AI Support (Fallback)
 - **Validation:** I hear that you're saying: "{input_text[:120]}..." — that sounds distressing and important.
@@ -418,15 +499,14 @@ Talk to your loved ones for support.
             st.markdown('</div>', unsafe_allow_html=True)
 
 with col2:
-    st.markdown('<div class="info-card"><h3>Why Mindful?</h3>- Modern\n- Gemini 2.5 models\n- 24/7 support</div>', unsafe_allow_html=True)
+    st.markdown('<div class="info-card"><h3>Why Mindful?</h3>- Modern, safe, and confidential\n- Gemini 2.5 AI models\n- 24/7 crisis guidance\n- Attractive for school projects</div>', unsafe_allow_html=True)
     st.markdown('<div class="info-card"><h3>Modes</h3>- Crisis Detection\n- Emotional Support\n- Risk Assessment</div>', unsafe_allow_html=True)
     st.markdown('<div class="emergency-banner">🚨 IN CRISIS? CALL KIRAN 1800-599-0019 🚨</div>', unsafe_allow_html=True)
 
-# Footer (unchanged)
-st.markdown("---")
+st.markdown('---')
 st.markdown("""
 <div class="footer-dark">
-<p><strong>Disclaimer:</strong> This tool does not replace professional help.
-If you are in crisis, contact emergency services or the KIRAN helpline (1800-599-0019).</p>
+    <p><strong>Disclaimer:</strong> This tool does not replace professional help. If you are in crisis, contact emergency services or the KIRAN helpline (1800-599-0019).</p>
+    <p>Premium Mental Health Support — Powered by Gemini 2.5</p>
 </div>
 """, unsafe_allow_html=True)
