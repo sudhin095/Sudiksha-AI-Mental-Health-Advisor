@@ -405,7 +405,7 @@ streamlit run app.py
 
 ## Key Features
 
-- ✍️ **Text Input:** Describe your feelings directly
+-  **Text Input:** Describe your feelings directly
 - 🎤 **Voice Input:** Speak and auto-transcribe to text (using `speech_to_text`)
 - 🧠 **AI Analysis:** Combined stress scoring (model + lexicon + reasoning)
 - 📊 **Circular Gauge:** Real-time stress visualization
@@ -424,3 +424,4 @@ streamlit run app.py
 - Voice transcription works best in quiet environments
 - Fallback support message if API fails
 - All analysis includes professional disclaimer
+
