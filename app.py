@@ -58,17 +58,12 @@ MODEL_NAMES = {
 }
 SIDEBAR_MODEL_KEYS = list(MODEL_NAMES.keys())
 
-
 # -------------------------
 # OpenRouter call helper
 # -------------------------
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 def call_openrouter(model, prompt, max_tokens=700, timeout_secs=25):
-    """
-    Calls OpenRouter chat completion endpoint.
-    Returns the assistant text or None on failure.
-    """
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
         "Content-Type": "application/json"
@@ -83,35 +78,25 @@ def call_openrouter(model, prompt, max_tokens=700, timeout_secs=25):
         r = requests.post(OPENROUTER_URL, headers=headers, json=payload, timeout=timeout_secs)
         if r.status_code == 200:
             j = r.json()
-            # OpenRouter returns choices -> message -> content
             return j["choices"][0]["message"]["content"]
         else:
-            # expose helpful debug in logs if needed
             st.warning(f"OpenRouter returned {r.status_code}: {r.text[:200]}")
             return None
     except Exception as e:
-        # network or timeout
         st.info(f"Model call failed: {str(e)}")
         return None
 
 # -------------------------
-# Safe generate wrapper (Qwen -> Mistral fallback)
+# Safe generate wrapper
 # -------------------------
 def safe_generate(prompt, preferred_model=None):
-    """
-    Try preferred_model (Qwen), then fallback to Mistral.
-    Returns the response text or None.
-    """
     models_try = []
     if preferred_model:
         models_try.append(preferred_model)
-    # ensure primary Qwen first if not provided
-    if "qwen" not in (m or ""):
+    if "qwen" not in (preferred_model or ""):
         models_try.append(MODEL_NAMES["Qwen 2.5-72B (Primary)"])
-    # fallback
     models_try.append(MODEL_NAMES["Mistral 7B Instruct (Fallback)"])
 
-    last_err = None
     for m in models_try:
         out = call_openrouter(m, prompt)
         if out:
@@ -122,7 +107,7 @@ def safe_generate(prompt, preferred_model=None):
     return None
 
 # -------------------------
-# Lexicon scoring (unchanged)
+# Lexicon scoring
 # -------------------------
 LEXICON_WEIGHTS = {
     "suicid": 5, "kill myself": 5, "end my life": 5, "i want to die": 5, "worthless": 4,
@@ -133,17 +118,13 @@ LEXICON_WEIGHTS = {
 
 def lexicon_score(text):
     t = text.lower()
-    score = 0.0
-    for kw, w in LEXICON_WEIGHTS.items():
-        if kw in t:
-            score += w
+    score = sum(w for kw, w in LEXICON_WEIGHTS.items() if kw in t)
     if any(k in t for k in ["suicid", "kill myself", "i want to die", "end my life"]):
         score = max(score, 8.0)
-    normalized = min(1.0, score / 10.0)
-    return int(round(normalized * 100))
+    return int(round(min(1.0, score / 10.0) * 100))
 
 # -------------------------
-# Model intensity (short JSON)
+# Model intensity and structured JSON
 # -------------------------
 def ask_model_for_intensity(user_text, model_name=None):
     prompt = (
@@ -159,15 +140,13 @@ def ask_model_for_intensity(user_text, model_name=None):
         return None
     try:
         data = json.loads(match.group())
-        intensity = int(max(0, min(100, int(data.get("intensity", 50)))))
-        confidence = float(max(0.0, min(1.0, float(data.get("confidence", 0.5)))))
-        return {"intensity": intensity, "confidence": confidence}
+        return {
+            "intensity": int(max(0, min(100, int(data.get("intensity", 50))))),
+            "confidence": float(max(0.0, min(1.0, float(data.get("confidence", 0.5)))))
+        }
     except Exception:
         return None
 
-# -------------------------
-# Model structured JSON score
-# -------------------------
 def ask_model_for_structured_stress(user_text, model_name=None):
     prompt = (
         "Return ONLY a single JSON object with keys:\n"
@@ -180,54 +159,39 @@ def ask_model_for_structured_stress(user_text, model_name=None):
     out = safe_generate(prompt, preferred_model=model_name)
     if not out:
         return None
-    txt = out.strip()
+    txt = out.strip().replace("'", '"')
     match = re.search(r'\{[\s\S]*\}', txt)
     if not match:
-        cleaned = txt.replace("'", '"')
-        match = re.search(r'\{[\s\S]*\}', cleaned)
-        if not match:
-            return None
-    json_text = match.group()
+        return None
     try:
-        data = json.loads(json_text)
+        data = json.loads(match.group())
     except Exception:
-        repaired = re.sub(r'(\w+):', r'"\1":', json_text)
+        repaired = re.sub(r'(\w+):', r'"\1":', match.group())
         try:
             data = json.loads(repaired)
         except Exception:
             return None
-    score = int(max(0, min(100, int(data.get("score", 50)))))
-    evidence = data.get("evidence", [])
-    confidence = float(max(0.0, min(1.0, float(data.get("confidence", 0.5)))))
-    return {"model_score": score, "evidence": evidence, "confidence": confidence}
+    return {
+        "model_score": int(max(0, min(100, int(data.get("score", 50))))),
+        "evidence": data.get("evidence", []),
+        "confidence": float(max(0.0, min(1.0, float(data.get("confidence", 0.5)))))
+    }
 
 # -------------------------
-# Combined scoring (Balanced B)
+# Combined scoring
 # -------------------------
 def get_stress_level(user_text, model_name=None):
     lex = lexicon_score(user_text)
     structured = ask_model_for_structured_stress(user_text, model_name=model_name)
     reasoning = ask_model_for_intensity(user_text, model_name=model_name)
 
-    model_score = None
-    model_conf = 0.0
-    reasoning_score = None
-    reasoning_conf = 0.0
+    model_score = structured["model_score"] if structured else None
+    model_conf = structured.get("confidence", 0.5) if structured else 0.0
+    reasoning_score = reasoning["intensity"] if reasoning else None
+    reasoning_conf = reasoning.get("confidence", 0.5) if reasoning else 0.0
 
-    if structured:
-        model_score = structured["model_score"]
-        model_conf = structured.get("confidence", 0.5)
-    if reasoning:
-        reasoning_score = reasoning["intensity"]
-        reasoning_conf = reasoning.get("confidence", 0.5)
-
-    # base weights
-    w_model_base = 0.45
-    w_lex_base = 0.30
-    w_reason_base = 0.25
-
-    w_model = w_model_base * (0.5 + 0.5 * (model_conf or 0.0))
-    w_reason = w_reason_base * (0.5 + 0.5 * (reasoning_conf or 0.0))
+    w_model = 0.45 * (0.5 + 0.5 * model_conf)
+    w_reason = 0.25 * (0.5 + 0.5 * reasoning_conf)
     w_lex = 1.0 - (w_model + w_reason)
     if w_lex < 0.1:
         w_lex = 0.1
@@ -237,9 +201,7 @@ def get_stress_level(user_text, model_name=None):
         w_lex /= total
 
     if model_score is None:
-        w_model = 0.0
-        w_lex = 0.75
-        w_reason = 0.25
+        w_model, w_lex, w_reason = 0.0, 0.75, 0.25
     if reasoning_score is None:
         if model_score is None:
             w_reason = 0.0
@@ -250,7 +212,6 @@ def get_stress_level(user_text, model_name=None):
 
     ms = model_score if model_score is not None else 50
     rs = reasoning_score if reasoning_score is not None else ms
-
     final = int(round(ms * w_model + lex * w_lex + rs * w_reason))
     final = max(0, min(100, final))
 
@@ -299,7 +260,7 @@ Talk to your loved ones for support.
 """
 
 # -------------------------
-# UI HEADER (unchanged)
+# UI HEADER
 # -------------------------
 st.markdown("""
 <div class="main-header">
@@ -308,7 +269,7 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-# QUOTES (unchanged)
+# QUOTES
 st.markdown("""
 <div style="
     background:rgba(49,24,94,0.55);
@@ -326,7 +287,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # -------------------------
-# SIDEBAR (unchanged look, models selectable)
+# SIDEBAR
 # -------------------------
 with st.sidebar:
     st.write("## Settings")
@@ -337,11 +298,9 @@ with st.sidebar:
     st.info("**KIRAN:** 1800-599-0019\n**Vandrevala:** 1860-2662-345\n**iCall:** 9152987821")
 
 # -------------------------
-# Web Speech API HTML (free speech-to-text)
+# Web Speech API HTML
 # -------------------------
 def web_speech_transcriber():
-    # This HTML uses the browser Web Speech API (Chrome/Edge/Brave). It calls
-    # Streamlit.setComponentValue(...) to return the transcript.
     html = """
     <div style="color: #e8d6ff; font-family: Inter, sans-serif;">
       <p style="margin-bottom:6px;">Click <b>Start</b> and speak. Click <b>Stop</b> to finish. (Browser-based, free)</p>
@@ -391,24 +350,21 @@ def web_speech_transcriber():
       stopBtn.onclick = () => {
         try { recognition.stop(); } catch(e) {}
         status.textContent = "⏹️ Stopped.";
-        // return final transcript to Streamlit component
         const payload = finalTranscript.trim();
         if (typeof window.parent !== "undefined" && window.parent.Streamlit) {
-          // set component return value
           window.parent.Streamlit.setComponentValue(payload);
         } else if (typeof Streamlit !== "undefined") {
           Streamlit.setComponentValue(payload);
         } else {
-          // fallback postMessage (older)
           window.parent.postMessage({ type: "STREAMLIT_WEB_SPEECH", transcript: payload }, "*");
         }
       };
     </script>
     """
-    return components.html(html, height=220, key="web_speech_comp")
+    return components.html(html, height=220)
 
 # -------------------------
-# MAIN UI (unchanged layout)
+# MAIN UI
 # -------------------------
 col1, col2 = st.columns([2, 1])
 
@@ -418,16 +374,13 @@ with col1:
 
     with tab1:
         st.markdown('<div class="info-card"><h3>Write your feelings</h3>', unsafe_allow_html=True)
-        # keep same key so session persists
         input_text = st.text_area("Describe your feelings, challenges, or thoughts.", height=160, key="txt_input")
         st.markdown("</div>", unsafe_allow_html=True)
 
     with tab2:
         st.markdown('<div class="info-card"><h3>Speak your mind</h3>', unsafe_allow_html=True)
         st.info("Click Start → speak → Stop. The transcript will populate the Text box. (Browser-based, free)")
-        # show the web speech transcriber component
         transcript_value = web_speech_transcriber()
-        # if user used the recorder library as fallback keep it
         audio_data = mic_recorder(
             start_prompt="🎤 Start Recording",
             stop_prompt="⏹️ Stop",
@@ -437,16 +390,12 @@ with col1:
         )
         if audio_data is not None:
             st.audio(audio_data["bytes"], format="audio/wav")
-            st.success("✅ Recording saved! (If you want automatic transcription paste audio or use the web recorder.)")
-        st.markdown("</div>", unsafe_allow_html=True)
+            st.success("✅ Recording saved!")
 
-        # If component returned a transcript (non-empty string), fill the text area
         if transcript_value and isinstance(transcript_value, str) and transcript_value.strip():
-            # populate the text area by updating session state
             st.session_state["txt_input"] = transcript_value.strip()
-            st.success("Transcription captured and placed into the text box. Press Analyze to continue.")
+            st.success("Transcription captured into the text box.")
 
-    # ANALYZE button (same)
     if st.button("🔍 Analyze & Get Support", use_container_width=True) and st.session_state.get("txt_input", "").strip():
         with st.spinner("Analyzing..."):
             input_text = st.session_state.get("txt_input", "")
@@ -464,7 +413,6 @@ with col1:
             </div>
             """, unsafe_allow_html=True)
 
-            # Build support prompt and call model
             support_prompt = build_support_prompt(mode, input_text)
             response_text = safe_generate(support_prompt, preferred_model=model_id)
 
@@ -472,14 +420,13 @@ with col1:
             if response_text:
                 st.markdown("### AI Support\n" + response_text)
             else:
-                # offline fallback helpful text
                 fallback_text = f"""
 ### AI Support (Fallback)
 - **Validation:** I hear that you're saying: "{input_text[:120]}..." — that sounds distressing and important.
 - **Immediate steps (tailored):**
-  1. Take 3 minutes of diaphragmatic breathing (inhale 4s, hold 4s, exhale 6s).
-  2. Write the single most urgent problem and one tiny step you can take now.
-  3. Reach out to one trusted person with this exact line: "I need to talk — I haven't been okay lately."
+  1. Take 3 minutes of diaphragmatic breathing.
+  2. Write one small step you can take now.
+  3. Reach out to one trusted person: "I need to talk — I haven't been okay lately."
 - **12–24 hour plan:** sleep hygiene, short walk outside, limit caffeine, connect with someone.
 - **When to seek help:** if you have thoughts of harming yourself, call a helpline immediately.
 ----------------------------------------
