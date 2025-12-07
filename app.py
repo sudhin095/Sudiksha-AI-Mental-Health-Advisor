@@ -51,7 +51,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ====== MODEL NAMES ======
+# ====== MODEL NAMES (unchanged UI labels) ======
 MODEL_NAMES = {
     "Gemini 2.5 Pro": "models/gemini-2.5-pro",
     "Gemini 2.5 Flash": "models/gemini-2.5-flash"
@@ -61,19 +61,17 @@ SIDEBAR_MODEL_KEYS = list(MODEL_NAMES.keys())
 # ====== Initialize Session State ======
 if "voice_text" not in st.session_state:
     st.session_state.voice_text = ""
-if "last_analysis" not in st.session_state:
-    st.session_state.last_analysis = None
 
 # -------------------------
-# Safe generate wrapper - NO CACHING, direct API calls
+# Safe generate wrapper - NO TIMEOUT PARAMETER
 # -------------------------
 def safe_generate(model_id, prompt, max_retries=3, backoff_base=2):
-    """Generate content with proper retry logic and NO caching."""
+    """Generate content with proper retry logic (removed timeout param)."""
     attempt = 0
     while attempt <= max_retries:
         try:
             model = genai.GenerativeModel(model_id)
-            response = model.generate_content(prompt, timeout=30)
+            response = model.generate_content(prompt)
             return response
         except Exception as e:
             msg = str(e).lower()
@@ -139,7 +137,7 @@ def ask_model_for_intensity(user_text, model_id):
         "Reply with ONLY valid JSON: {\"intensity\": <0-100>, \"confidence\": <0.0-1.0>}.\n\n"
         f"Text: {user_text}\n"
     )
-    time.sleep(0.5)  # Delay to avoid rate limit
+    time.sleep(0.5)
     resp = safe_generate(model_id, prompt, max_retries=2)
     if not resp:
         return None
@@ -168,7 +166,7 @@ def ask_model_for_structured_stress(user_text, model_id):
         f"User text:\n{user_text}\n\n"
         "Example: {\"score\":72, \"evidence\": [\"I can't sleep\"], \"confidence\":0.83}"
     )
-    time.sleep(0.5)  # Delay to avoid rate limit
+    time.sleep(0.5)
     resp = safe_generate(model_id, prompt, max_retries=2)
     if not resp:
         return None
@@ -265,7 +263,7 @@ def get_stress_desc(level):
     return "😰 High Stress — Strong distress detected."
 
 # -------------------------
-# FIX: Context-aware support prompt
+# Context-aware support prompt
 # -------------------------
 def build_support_prompt(mode, text, stress_level):
     """Build unique, context-specific support prompt."""
@@ -383,22 +381,32 @@ with col1:
                 </div>
                 """, unsafe_allow_html=True)
 
-                # Generate personalized support (with stress level passed)
+                # Generate personalized support
                 st.markdown("### Generating personalized support...")
                 support_prompt = build_support_prompt(mode, final_text, final_level)
-                time.sleep(1)  # Wait before API call
+                time.sleep(1)
                 response = safe_generate(model_id, support_prompt, max_retries=3)
 
                 st.markdown('<div class="response-area">', unsafe_allow_html=True)
                 if response and response.text:
                     st.markdown("### 💬 AI Support\n" + response.text)
                 else:
+                    # Extract key concern for fallback
+                    concerns = []
+                    if "sleep" in final_text.lower():
+                        concerns.append("sleep issues")
+                    if "overwhelm" in final_text.lower():
+                        concerns.append("feeling overwhelmed")
+                    if "alone" in final_text.lower():
+                        concerns.append("isolation")
+                    concern_str = concerns[0] if concerns else "your mental health"
+                    
                     fallback_text = f"""
 ### 💬 AI Support (Offline Fallback)
 
 **Your Situation:** You mentioned: "{final_text[:100]}..."
 
-**What I hear:** This sounds important and distressing. Your feelings are valid.
+**What I hear:** This sounds important and distressing. Your feelings about {concern_str} are valid.
 
 **Immediate steps:**
 1. **Ground yourself** - 5-4-3-2-1 technique: Name 5 things you see, 4 you hear, 3 you touch, 2 you smell, 1 you taste
@@ -411,7 +419,7 @@ with col1:
 - Avoid major decisions
 
 **Script to ask for help:**
-"I've been struggling with [{specific_issue}]. I could use your support. Can we talk?"
+"I've been struggling with {concern_str}. I could use your support. Can we talk?"
 
 **When to escalate:**
 - Thoughts of harming yourself
@@ -426,9 +434,6 @@ This is not a substitute for professional help.
 """
                     st.markdown(fallback_text)
                 st.markdown('</div>', unsafe_allow_html=True)
-                
-                # Store analysis in session state to prevent duplicate API calls
-                st.session_state.last_analysis = final_text
 
 with col2:
     st.markdown('<div class="info-card"><h3>Why Mindful?</h3>- Modern<br>- Gemini 2.5 models<br>- 24/7 support</div>', unsafe_allow_html=True)
