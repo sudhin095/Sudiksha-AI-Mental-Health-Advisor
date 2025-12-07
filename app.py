@@ -4,20 +4,48 @@ import google.generativeai as genai
 import re
 import json
 import time
+import os
 
 # =========================
-# GEMINI API KEY (Secrets)
+# GEMINI API KEY - Robust Loading
 # =========================
-try:
-    GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
-except Exception:
-    GEMINI_API_KEY = None
+def get_api_key():
+    """Get API key from secrets or environment."""
+    try:
+        key = st.secrets.get("GEMINI_API_KEY", "").strip()
+        if key and key != "":
+            return key
+    except:
+        pass
+    
+    key = os.getenv("GEMINI_API_KEY", "").strip()
+    if key and key != "":
+        return key
+    
+    return None
+
+GEMINI_API_KEY = get_api_key()
 
 if not GEMINI_API_KEY:
-    st.error("⚠️ No GEMINI_API_KEY found. Add it to .streamlit/secrets.toml.")
+    st.error("""
+    ⚠️ API Key not found!
+    
+    **For Local Development:**
+    Create `.streamlit/secrets.toml` with:
+    ```
+    GEMINI_API_KEY = "your-api-key-here"
+    ```
+    
+    **For Streamlit Cloud:**
+    Settings → Secrets → Add GEMINI_API_KEY
+    """)
     st.stop()
 
-genai.configure(api_key=GEMINI_API_KEY)
+try:
+    genai.configure(api_key=GEMINI_API_KEY)
+except Exception as e:
+    st.error(f"⚠️ Failed to configure API: {str(e)}")
+    st.stop()
 
 # =========================
 #  PAGE CONFIG + CSS
@@ -51,7 +79,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ====== MODEL NAMES (unchanged UI labels) ======
+# ====== MODEL NAMES ======
 MODEL_NAMES = {
     "Gemini 2.5 Pro": "models/gemini-2.5-pro",
     "Gemini 2.5 Flash": "models/gemini-2.5-flash"
@@ -63,47 +91,69 @@ if "voice_text" not in st.session_state:
     st.session_state.voice_text = ""
 
 # -------------------------
-# Safe generate wrapper - NO TIMEOUT PARAMETER
+# Safe generate wrapper with DETAILED LOGGING
 # -------------------------
 def safe_generate(model_id, prompt, max_retries=3, backoff_base=2):
-    """Generate content with proper retry logic (removed timeout param)."""
+    """Generate content with proper retry logic and detailed error reporting."""
     attempt = 0
+    last_error = None
+    
     while attempt <= max_retries:
         try:
+            st.write(f"🔄 API Call Attempt {attempt + 1} with {model_id}...")
             model = genai.GenerativeModel(model_id)
             response = model.generate_content(prompt)
-            return response
+            
+            if response and response.text:
+                st.success(f"✅ API Success on attempt {attempt + 1}")
+                return response
+            else:
+                st.warning(f"⚠️ Empty response from API")
+                return None
+                
         except Exception as e:
+            last_error = e
             msg = str(e).lower()
-            attempt += 1
+            
+            # API key invalid
+            if "invalid" in msg or "expired" in msg or "unauthorized" in msg or "api_key_invalid" in msg:
+                st.error(f"❌ API Key Error: {str(e)}")
+                st.error("Check your GEMINI_API_KEY in .streamlit/secrets.toml")
+                return None
             
             # Rate limit: switch to flash
             if "429" in msg or "quota" in msg or "rate limit" in msg:
                 if model_id == "models/gemini-2.5-flash":
                     if attempt < max_retries:
-                        wait_time = (2 ** attempt) + (attempt * 0.5)
-                        time.sleep(wait_time)
+                        wait = 2 ** (attempt + 1)
+                        st.warning(f"⚠️ Flash rate limited. Waiting {wait}s before retry...")
+                        time.sleep(wait)
+                        attempt += 1
                         continue
                     return None
                 
-                st.warning("⚠️ Switching to Gemini 2.5 Flash due to rate limit.")
+                st.warning("⚠️ Pro quota reached. Switching to Flash...")
                 model_id = "models/gemini-2.5-flash"
                 time.sleep(1)
                 continue
             
-            # Transient errors: retry with backoff
-            if "500" in msg or "503" in msg or "deadline" in msg.lower():
+            # Transient errors: retry
+            if "500" in msg or "503" in msg or "deadline" in msg or "timeout" in msg:
                 if attempt < max_retries:
-                    wait_time = (2 ** attempt)
-                    time.sleep(wait_time)
+                    wait = 2 ** attempt
+                    st.warning(f"⚠️ Temporary error. Retrying in {wait}s...")
+                    time.sleep(wait)
+                    attempt += 1
                     continue
             
             # Other errors
-            if attempt >= max_retries:
-                st.error(f"API Error: {str(e)}")
+            attempt += 1
+            if attempt <= max_retries:
+                time.sleep(2 ** attempt)
+                continue
+            else:
+                st.error(f"❌ API failed after {max_retries} retries: {str(e)}")
                 return None
-            
-            time.sleep(2 ** attempt)
     
     return None
 
@@ -137,8 +187,9 @@ def ask_model_for_intensity(user_text, model_id):
         "Reply with ONLY valid JSON: {\"intensity\": <0-100>, \"confidence\": <0.0-1.0>}.\n\n"
         f"Text: {user_text}\n"
     )
-    time.sleep(0.5)
+    time.sleep(0.3)
     resp = safe_generate(model_id, prompt, max_retries=2)
+    
     if not resp:
         return None
     txt = resp.text.strip()
@@ -150,7 +201,8 @@ def ask_model_for_intensity(user_text, model_id):
         intensity = int(max(0, min(100, int(data.get("intensity", 50)))))
         confidence = float(max(0.0, min(1.0, float(data.get("confidence", 0.5)))))
         return {"intensity": intensity, "confidence": confidence}
-    except Exception:
+    except Exception as ex:
+        st.warning(f"JSON parse error in intensity: {str(ex)}")
         return None
 
 # -------------------------
@@ -166,8 +218,9 @@ def ask_model_for_structured_stress(user_text, model_id):
         f"User text:\n{user_text}\n\n"
         "Example: {\"score\":72, \"evidence\": [\"I can't sleep\"], \"confidence\":0.83}"
     )
-    time.sleep(0.5)
+    time.sleep(0.3)
     resp = safe_generate(model_id, prompt, max_retries=2)
+    
     if not resp:
         return None
     txt = resp.text.strip()
@@ -184,8 +237,10 @@ def ask_model_for_structured_stress(user_text, model_id):
         repaired = re.sub(r'(\w+):', r'"\1":', json_text)
         try:
             data = json.loads(repaired)
-        except Exception:
+        except Exception as ex:
+            st.warning(f"JSON parse error in structured: {str(ex)}")
             return None
+    
     score = int(max(0, min(100, int(data.get("score", 50)))))
     evidence = data.get("evidence", [])
     confidence = float(max(0.0, min(1.0, float(data.get("confidence", 0.5)))))
@@ -197,6 +252,8 @@ def ask_model_for_structured_stress(user_text, model_id):
 def get_stress_level(user_text, model_id):
     """Calculate combined stress level."""
     lex = lexicon_score(user_text)
+    
+    st.write("📊 Calculating stress level...")
     structured = ask_model_for_structured_stress(user_text, model_id)
     reasoning = ask_model_for_intensity(user_text, model_id)
 
@@ -208,9 +265,11 @@ def get_stress_level(user_text, model_id):
     if structured:
         model_score = structured["model_score"]
         model_conf = structured.get("confidence", 0.5)
+        st.write(f"✓ Model score: {model_score}")
     if reasoning:
         reasoning_score = reasoning["intensity"]
         reasoning_conf = reasoning.get("confidence", 0.5)
+        st.write(f"✓ Reasoning score: {reasoning_score}")
 
     w_model_base = 0.45
     w_lex_base = 0.30
@@ -247,6 +306,8 @@ def get_stress_level(user_text, model_id):
     final = int(round(ms * w_model + lex * w_lex + rs * w_reason))
     final = max(0, min(100, final))
 
+    st.write(f"✓ Lexicon score: {lex}, Final: {final}")
+
     meta = {
         "model_score": ms if model_score is not None else None,
         "model_conf": model_conf if model_score is not None else None,
@@ -263,10 +324,10 @@ def get_stress_desc(level):
     return "😰 High Stress — Strong distress detected."
 
 # -------------------------
-# Context-aware support prompt
+# Context-aware support prompt with stress level
 # -------------------------
 def build_support_prompt(mode, text, stress_level):
-    """Build unique, context-specific support prompt."""
+    """Build unique, context-specific support prompt with stress level."""
     
     mode_guide = {
         "Crisis Detection": "Focus on immediate safety. Identify risk factors. Provide urgent resources.",
@@ -274,24 +335,26 @@ def build_support_prompt(mode, text, stress_level):
         "Risk Assessment": "Assess severity. Provide structured intervention plan.",
     }
     
-    return f"""You are a compassionate mental health professional. 
+    return f"""You are a compassionate mental health professional responding to someone with a {stress_level}% stress level.
 
 ANALYSIS MODE: {mode}
-STRESS LEVEL: {stress_level}%
-{mode_guide.get(mode, "")}
+STRESS LEVEL DETECTED: {stress_level}%
+CONTEXT: {mode_guide.get(mode, "")}
 
-USER'S SPECIFIC MESSAGE:
+IMPORTANT: Every response MUST be unique and tailored to these EXACT words from the person:
 "{text}"
 
-Based on THIS SPECIFIC person and THEIR EXACT WORDS, provide:
+Generate a personalized response that:
+1. References their SPECIFIC situation (not generic advice)
+2. Validates their EXACT words and emotions
+3. Provides 3 concrete coping actions tailored to THEIR problem
+4. Includes a 24-hour action plan specific to them
+5. Gives a one-sentence script they can use to ask for help
+6. Lists warning signs specific to what they mentioned
 
-1. **Personalized Validation** - Reference exactly what they said
-2. **3 Concrete Coping Actions** - Specific to their situation  
-3. **24-Hour Action Plan** - Realistic next steps
-4. **Script to Ask for Help** - One sentence they can use
-5. **Warning Signs** - What to watch for specific to them
+Use Markdown. IMPORTANT: DO NOT provide a generic response. Everything must reference their specific situation and words.
 
-Use Markdown formatting. End with:
+End with:
 ----------------------------------------
 ⚠ **Important Disclaimer**
 This AI may be inaccurate. Seek professional help.
@@ -381,14 +444,14 @@ with col1:
                 </div>
                 """, unsafe_allow_html=True)
 
-                # Generate personalized support
+                # Generate personalized support with stress level
                 st.markdown("### Generating personalized support...")
                 support_prompt = build_support_prompt(mode, final_text, final_level)
                 time.sleep(1)
                 response = safe_generate(model_id, support_prompt, max_retries=3)
 
                 st.markdown('<div class="response-area">', unsafe_allow_html=True)
-                if response and response.text:
+                if response and response.text and len(response.text) > 100:
                     st.markdown("### 💬 AI Support\n" + response.text)
                 else:
                     # Extract key concern for fallback
@@ -399,37 +462,45 @@ with col1:
                         concerns.append("feeling overwhelmed")
                     if "alone" in final_text.lower():
                         concerns.append("isolation")
-                    concern_str = concerns[0] if concerns else "your mental health"
+                    if "panic" in final_text.lower():
+                        concerns.append("panic attacks")
+                    if "anxious" in final_text.lower():
+                        concerns.append("anxiety")
+                    
+                    concern_str = concerns[0] if concerns else "your emotional wellbeing"
                     
                     fallback_text = f"""
-### 💬 AI Support (Offline Fallback)
+### 💬 AI Support (Offline Mode)
 
-**Your Situation:** You mentioned: "{final_text[:100]}..."
+**Your Situation:** You shared: "{final_text[:100]}..."
 
-**What I hear:** This sounds important and distressing. Your feelings about {concern_str} are valid.
+**Stress Level:** {final_level}% - {get_stress_desc(final_level)}
 
-**Immediate steps:**
-1. **Ground yourself** - 5-4-3-2-1 technique: Name 5 things you see, 4 you hear, 3 you touch, 2 you smell, 1 you taste
-2. **Reach out** - Text/call someone you trust: "I'm not okay right now, can we talk?"
-3. **Move your body** - 10-minute walk or stretch to shift your nervous system
+**I hear you:** Your struggle with {concern_str} is real and valid. Here's personalized support:
 
-**Next 24 hours:**
-- Prioritize sleep (even 20-min power nap)
-- Eat something nourishing
-- Avoid major decisions
+**Immediate Coping Actions (for your situation):**
+1. **For {concern_str}** - Start with 5-4-3-2-1 grounding: Name 5 things you see, 4 you hear, 3 you touch, 2 you smell, 1 you taste
+2. **Reach out immediately** - Call/text someone safe: "I'm struggling with {concern_str}. Can we talk?"
+3. **Physical shift** - 10-min walk, cold water on face, or stretching to change your nervous system
 
-**Script to ask for help:**
-"I've been struggling with {concern_str}. I could use your support. Can we talk?"
+**Your 24-Hour Plan:**
+- **Now:** One grounding technique above
+- **Next 2 hours:** Reach out to 1 person
+- **Tonight:** Sleep focus, avoid decisions, limit caffeine
 
-**When to escalate:**
-- Thoughts of harming yourself
-- Inability to function
-- Overwhelming isolation
+**Script to Ask for Help:**
+"I've been dealing with {concern_str} and I'm not handling it well. I need your support."
+
+**Warning Signs (Watch for these):**
+- Thoughts of harming yourself → Call KIRAN immediately
+- Inability to function → Reach out to professional
+- Complete isolation → Force connection with someone
 
 ----------------------------------------
 ⚠ **Important Disclaimer**
-This is not a substitute for professional help.
+This is not professional help. Seek real mental health support.
 **Indian Mental Health Helpline:** 1800-599-0019
+**Crisis Chat:** https://www.aasra.info/
 ----------------------------------------
 """
                     st.markdown(fallback_text)
@@ -443,6 +514,6 @@ with col2:
 st.markdown("---")
 st.markdown("""
 <div style="color: #fafafa; padding: 1rem 0; border-radius: 8px;">
-<p><strong>Disclaimer:</strong> This tool does not replace professional help. If you are in crisis, contact emergency services or KIRAN (1800-599-0019).</p>
+<p><strong>Disclaimer:</strong> This tool does not replace professional help. If you are in crisis, contact KIRAN (1800-599-0019).</p>
 </div>
 """, unsafe_allow_html=True)
