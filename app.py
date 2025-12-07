@@ -285,36 +285,83 @@ def get_stress_desc(level):
     return "😰 High Stress — Strong distress detected."
 
 # -------------------------
-# Support message builder (more specific)
+# FIX: Mode-specific and input-specific support prompt builder
 # -------------------------
-def build_support_prompt(mode, text):
+def build_support_prompt(mode, text, stress_level):
+    """
+    Build a unique, contextual support prompt based on:
+    - Specific user text
+    - Analysis mode selected
+    - Detected stress level
+    This ensures different responses for different inputs.
+    """
+    
+    mode_instructions = {
+        "Crisis Detection": """
+You are a crisis intervention specialist. Identify any signs of immediate danger or self-harm intent.
+Provide urgent, actionable steps and strong validation.
+Emphasize professional help resources.
+        """,
+        "Emotional Support": """
+You are a compassionate mental health counselor. Focus on validation, understanding, and practical coping strategies.
+Use gentle language and normalize their feelings.
+Provide realistic, achievable steps forward.
+        """,
+        "Risk Assessment": """
+You are a risk assessment expert. Evaluate the severity and provide targeted interventions.
+Assess ongoing risk factors and protective factors.
+Provide structured action plan based on risk level.
+        """
+    }
+    
+    stress_context = {
+        "high": "The person reports very high stress (>75%). Prioritize immediate relief strategies and professional resources.",
+        "moderate": "The person reports moderate stress (50-75%). Balance validation with practical coping tools.",
+        "mild": "The person reports mild stress (<50%). Focus on prevention and strengthening coping skills.",
+    }
+    
+    stress_range = "high" if stress_level >= 75 else "moderate" if stress_level >= 50 else "mild"
+    
     return f"""
-You are a deeply empathetic professional mental-health assistant.
-Use the user's exact phrases where relevant. Be specific and avoid generic stock responses.
+{mode_instructions.get(mode, "You are a supportive mental health assistant.")}
 
-User text:
-{text}
+STRESS CONTEXT: {stress_context.get(stress_range)}
+STRESS LEVEL: {stress_level}%
 
-Mode: {mode}
+USER'S SPECIFIC SITUATION:
+"{text}"
 
-Produce a structured response in Markdown with these sections:
-- Brief personalized validation (quote exact phrases)
-- 4 tailored coping actions (why each helps for this user)
-- Immediate 12–24 hour plan (3 items)
-- How to phrase asking for help to a loved one (one-sentence script)
-- Warning signs to monitor and when to seek professional help
+Based on this SPECIFIC person and their SPECIFIC words, generate a personalized response with:
 
-End with the exact disclaimer block (do not vary):
+1. **Personalized Validation** (use exact phrases from their message)
+   - Reference what they specifically mentioned
+   - Validate their specific emotions/concerns
+
+2. **3-4 Tailored Coping Actions** (specific to their situation)
+   - Why each helps for THEIR specific situation
+   - How to do each one concretely
+
+3. **Immediate 12-24 Hour Plan** (3 concrete steps)
+   - Specific to their situation
+   - Realistic and achievable
+
+4. **Script for Asking Help** (one-sentence, personalized)
+   - Based on their specific concerns
+
+5. **Warning Signs to Monitor** (specific to what they mentioned)
+   - When to escalate to professional help
+
+End with the exact disclaimer:
 ----------------------------------------
 ⚠ **Important Disclaimer**
-This AI may be inaccurate. Please seek medical advice from a professional.  
-Talk to your loved ones for support.  
+This AI may be inaccurate. Please seek medical advice from a professional.
+Talk to your loved ones for support.
 **Indian Mental Health Helpline:** 1800-599-0019
 ----------------------------------------
 """
 
 # -------------------------
-# UI HEADER (unchanged)
+# UI HEADER
 # -------------------------
 st.markdown("""
 <div class="main-header">
@@ -323,7 +370,6 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-# QUOTES (unchanged)
 st.markdown("""
 <div style="
     background:rgba(49,24,94,0.55);
@@ -335,13 +381,13 @@ st.markdown("""
     box-shadow:0 4px 14px #31185e50;
     font-size:0.95rem;
     font-style:italic;">
-“If you're going through hell, keep going.”<br>
-“If there is something that means a lot to you, do not postpone it.”
+"If you're going through hell, keep going."<br>
+"If there is something that means a lot to you, do not postpone it."
 </div>
 """, unsafe_allow_html=True)
 
 # -------------------------
-# SIDEBAR (unchanged labels)
+# SIDEBAR
 # -------------------------
 with st.sidebar:
     st.write("## Settings")
@@ -352,7 +398,7 @@ with st.sidebar:
     st.info("**KIRAN:** 1800-599-0019\n**Vandrevala:** 1860-2662-345\n**iCall:** 9152987821")
 
 # -------------------------
-# MAIN UI (unchanged layout)
+# MAIN UI
 # -------------------------
 col1, col2 = st.columns([2, 1])
 
@@ -362,7 +408,7 @@ with col1:
 
     with tab1:
         st.markdown('<div class="info-card"><h3>Write your feelings</h3>', unsafe_allow_html=True)
-        input_text = st.text_area("Describe your feelings.", height=160)
+        input_text = st.text_area("Describe your feelings.", height=160, key="text_input")
         st.markdown('</div>', unsafe_allow_html=True)
 
     with tab2:
@@ -389,8 +435,8 @@ with col1:
             </div>
             """, unsafe_allow_html=True)
 
-            # Build a specific support prompt and generate answer (safe)
-            support_prompt = build_support_prompt(mode, input_text)
+            # Build a specific support prompt with stress level included (FIX)
+            support_prompt = build_support_prompt(mode, input_text, final_level)
             response = safe_generate(model_id, support_prompt)
 
             st.markdown('<div class="response-area">', unsafe_allow_html=True)
@@ -418,14 +464,14 @@ Talk to your loved ones for support.
             st.markdown('</div>', unsafe_allow_html=True)
 
 with col2:
-    st.markdown('<div class="info-card"><h3>Why Mindful?</h3>- Modern\n- Gemini 2.5 models\n- 24/7 support</div>', unsafe_allow_html=True)
-    st.markdown('<div class="info-card"><h3>Modes</h3>- Crisis Detection\n- Emotional Support\n- Risk Assessment</div>', unsafe_allow_html=True)
+    st.markdown('<div class="info-card"><h3>Why Mindful?</h3>- Modern<br>- Gemini 2.5 models<br>- 24/7 support</div>', unsafe_allow_html=True)
+    st.markdown('<div class="info-card"><h3>Modes</h3>- Crisis Detection<br>- Emotional Support<br>- Risk Assessment</div>', unsafe_allow_html=True)
     st.markdown('<div class="emergency-banner">🚨 IN CRISIS? CALL KIRAN 1800-599-0019 🚨</div>', unsafe_allow_html=True)
 
 # Footer (unchanged)
 st.markdown("---")
 st.markdown("""
-<div class="footer-dark">
+<div style="color: #fafafa; padding: 1rem 0; border-radius: 8px;">
 <p><strong>Disclaimer:</strong> This tool does not replace professional help.
 If you are in crisis, contact emergency services or the KIRAN helpline (1800-599-0019).</p>
 </div>
