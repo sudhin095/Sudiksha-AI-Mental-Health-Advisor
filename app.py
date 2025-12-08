@@ -53,7 +53,6 @@ st.markdown("""
 
 # ====== MODEL NAMES (unchanged UI labels) ======
 MODEL_NAMES = {
-    "Gemini 2.5 Pro": "models/gemini-2.5-pro",
     "Gemini 2.5 Flash": "models/gemini-2.5-flash"
 }
 SIDEBAR_MODEL_KEYS = list(MODEL_NAMES.keys())
@@ -430,4 +429,5 @@ st.markdown("""
 If you are in crisis, contact emergency services or the KIRAN helpline (1800-599-0019).</p>
 </div>
 """, unsafe_allow_html=True)
+
 
