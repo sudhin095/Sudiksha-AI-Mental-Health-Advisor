@@ -340,11 +340,12 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # -------------------------
-# SIDEBAR (unchanged labels)
+# SIDEBAR (FIXED index)
 # -------------------------
 with st.sidebar:
     st.write("## Settings")
-    chosen_model_name = st.selectbox("Choose AI Model", SIDEBAR_MODEL_KEYS, index=1)
+    # CHANGED: index=1 -> index=0 because MODEL_NAMES has only 1 item
+    chosen_model_name = st.selectbox("Choose AI Model", SIDEBAR_MODEL_KEYS, index=0)
     model_id = MODEL_NAMES[chosen_model_name]
     mode = st.radio("Analysis Mode", ["Crisis Detection", "Emotional Support", "Risk Assessment"])
     st.write("### Emergency Resources")
@@ -429,5 +430,3 @@ st.markdown("""
 If you are in crisis, contact emergency services or the KIRAN helpline (1800-599-0019).</p>
 </div>
 """, unsafe_allow_html=True)
-
-
