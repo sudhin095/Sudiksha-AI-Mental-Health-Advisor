@@ -200,7 +200,7 @@ DISTANCING_PHRASES = [
 
 def lexicon_score(text):
     t = text.lower()
-    tokens = re.split(r'\\\\\\\\W+', t)
+    tokens = re.split(r'\W+', t)
     score = 0.0
 
     distancing = any(phrase in t for phrase in DISTANCING_PHRASES)
@@ -235,7 +235,7 @@ def lexicon_score(text):
     crisis_keywords = ["suicid", "kill myself", "i want to die", "end my life"]
     has_crisis = any(k in t for k in crisis_keywords)
     if has_crisis:
-        crisis_tokens = re.split(r'\\\\\\\\W+', t)
+        crisis_tokens = re.split(r'\W+', t)
         crisis_negated = False
         for k in crisis_keywords:
             if k in t:
@@ -256,15 +256,15 @@ def lexicon_score(text):
 # -------------------------
 def ask_model_for_intensity(user_text, model_id):
     prompt = (
-        "You are an evaluator that gives a concise numeric emotional intensity score.\\\\\\\\n"
-        "Reply with ONLY valid JSON: {\\\\\\\\"intensity\\\\\\\\": <0-100>, \\\\\\\\"confidence\\\\\\\\": <0.0-1.0>}.\\\\\\\\n\\\\\\\\n"
-        f"Text: {user_text}\\\\\\\\n"
+        "You are an evaluator that gives a concise numeric emotional intensity score.\n"
+        "Reply with ONLY valid JSON: {\"intensity\": <0-100>, \"confidence\": <0.0-1.0>}.\n\n"
+        f"Text: {user_text}\n"
     )
     resp = safe_generate(model_id, prompt)
     if not resp:
         return None
     txt = resp.text.strip()
-    match = re.search(r"\\\\\\\\{[\\\\\\\\s\\\\\\\\S]*?\\\\\\\\}", txt)
+    match = re.search(r"\{[\s\S]*?\}", txt)
     if not match:
         return None
     try:
@@ -280,28 +280,28 @@ def ask_model_for_intensity(user_text, model_id):
 # -------------------------
 def ask_model_for_structured_stress(user_text, model_id):
     prompt = (
-        "Return ONLY a single JSON object with keys:\\\\\\\\n"
-        "score: integer 0-100\\\\\\\\n"
-        "evidence: array of brief verbatim phrases from the user's text\\\\\\\\n"
-        "confidence: float 0.0-1.0\\\\\\\\n\\\\\\\\n"
-        f"User text:\\\\\\\\n{user_text}\\\\\\\\n\\\\\\\\n"
-        "Example: {\\\\\\\\"score\\\\\\\\":72, \\\\\\\\"evidence\\\\\\\\": [\\\\\\\\"I can't sleep\\\\\\\\"], \\\\\\\\"confidence\\\\\\\\":0.83}"
+        "Return ONLY a single JSON object with keys:\n"
+        "score: integer 0-100\n"
+        "evidence: array of brief verbatim phrases from the user's text\n"
+        "confidence: float 0.0-1.0\n\n"
+        f"User text:\n{user_text}\n\n"
+        "Example: {\"score\":72, \"evidence\": [\"I can't sleep\"], \"confidence\":0.83}"
     )
     resp = safe_generate(model_id, prompt)
     if not resp:
         return None
     txt = resp.text.strip()
-    match = re.search(r'\\\\\\\\{[\\\\\\\\s\\\\\\\\S]*\\\\\\\\}', txt)
+    match = re.search(r'\{[\s\S]*\}', txt)
     if not match:
         cleaned = txt.replace("'", '"')
-        match = re.search(r'\\\\\\\\{[\\\\\\\\s\\\\\\\\S]*\\\\\\\\}', cleaned)
+        match = re.search(r'\{[\s\S]*\}', cleaned)
         if not match:
             return None
     json_text = match.group()
     try:
         data = json.loads(json_text)
     except Exception:
-        repaired = re.sub(r'(\\\\\\\\w+):', r'"\\\\\\\\1":', json_text)
+        repaired = re.sub(r'(\w+):', r'"\1":', json_text)
         try:
             data = json.loads(repaired)
         except Exception:
@@ -474,7 +474,7 @@ with st.sidebar:
     selected_lang = LANGUAGES[chosen_lang_label]
 
     st.write("### Emergency Resources")
-    st.info("**KIRAN:** 1800-599-0019\\\\\\\\n**Vandrevala:** 1860-2662-345\\\\\\\\n**iCall:** 9152987821")
+    st.info("**KIRAN:** 1800-599-0019\n**Vandrevala:** 1860-2662-345\n**iCall:** 9152987821")
 
 # -------------------------
 # Session state init
@@ -598,7 +598,7 @@ with col1:
 
             st.markdown('<div class="response-area">', unsafe_allow_html=True)
             if response:
-                st.markdown("### AI Support\\\\\\\\n" + response.text)
+                st.markdown("### AI Support\n" + response.text)
             else:
                 fallback_text = f"""
 ### AI Support (Fallback)
@@ -622,8 +622,8 @@ Talk to your loved ones for support.
         st.session_state["voice_transcript"] = ""
 
 with col2:
-    st.markdown('<div class="info-card"><h3>Why Mindful?</h3>- Modern\\\\\\\\n- Gemini 2.5 models\\\\\\\\n- 24/7 support</div>', unsafe_allow_html=True)
-    st.markdown('<div class="info-card"><h3>Modes</h3>- Crisis Detection\\\\\\\\n- Emotional Support\\\\\\\\n- Risk Assessment</div>', unsafe_allow_html=True)
+    st.markdown('<div class="info-card"><h3>Why Mindful?</h3>- Modern\n- Gemini 2.5 models\n- 24/7 support</div>', unsafe_allow_html=True)
+    st.markdown('<div class="info-card"><h3>Modes</h3>- Crisis Detection\n- Emotional Support\n- Risk Assessment</div>', unsafe_allow_html=True)
     st.markdown('<div class="emergency-banner">🚨 IN CRISIS? CALL KIRAN 1800-599-0019 🚨</div>', unsafe_allow_html=True)
 
 # Footer
