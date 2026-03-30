@@ -51,18 +51,67 @@ st.markdown("""
     .stress-percentage {font-size:2.8rem;font-weight:700;color:#00fff5;}
     .stress-label {font-size:0.95rem;color:#bb86fc;text-transform:uppercase;}
     .transcript-box {background:rgba(0,255,245,0.07);border:1px solid #00fff540;border-radius:10px;padding:0.8rem 1rem;color:#e8d6ff;font-size:0.95rem;margin-top:0.7rem;}
+    .mood-tag-btn button {background:rgba(49,24,94,0.8)!important;border:1px solid #bb86fc!important;border-radius:20px!important;color:#e8d6ff!important;font-size:0.9rem!important;padding:0.3rem 0.9rem!important;margin:0.2rem!important;}
+    .cooldown-bar {background:rgba(255,107,107,0.15);border:1px solid #ff6b6b60;border-radius:10px;padding:0.6rem 1rem;color:#ff6b6b;font-size:0.9rem;text-align:center;margin-bottom:0.5rem;}
+
+    /* ---- Breathing Widget ---- */
+    @keyframes breathe {
+        0%   { transform: scale(1);   box-shadow: 0 0 0px #00fff580; }
+        40%  { transform: scale(1.45); box-shadow: 0 0 38px #00fff5cc; }
+        60%  { transform: scale(1.45); box-shadow: 0 0 38px #00fff5cc; }
+        100% { transform: scale(1);   box-shadow: 0 0 0px #00fff580; }
+    }
+    @keyframes breatheText {
+        0%,100% { opacity:0.5; content:"Breathe In…"; }
+        40%,60% { opacity:1;   content:"Hold…"; }
+    }
+    .breathing-widget {
+        display:flex; flex-direction:column; align-items:center;
+        background:rgba(0,255,245,0.05); border:1px solid #00fff530;
+        border-radius:18px; padding:1.5rem 1rem; margin:1.2rem 0;
+    }
+    .breathing-widget h4 { color:#00fff5; font-size:1rem; margin-bottom:0.8rem; letter-spacing:1px; }
+    .breath-circle {
+        width:90px; height:90px; border-radius:50%;
+        background:radial-gradient(circle, #00fff540, #00fff510);
+        border:2px solid #00fff5;
+        animation: breathe 8s ease-in-out infinite;
+        display:flex; align-items:center; justify-content:center;
+    }
+    .breath-inner { color:#00fff5; font-size:0.72rem; text-align:center; line-height:1.4; font-weight:600; letter-spacing:0.5px; }
+    .breath-steps { color:#c9aaff; font-size:0.8rem; margin-top:0.7rem; text-align:center; line-height:1.8; }
 </style>
 """, unsafe_allow_html=True)
 
-# ====== MODEL NAMES (unchanged UI labels) ======
+# ====== MODEL NAMES ======
 MODEL_NAMES = {
     "Gemini 2.5 Pro": "models/gemini-2.5-pro",
     "Gemini 2.5 Flash": "models/gemini-2.5-flash"
 }
 SIDEBAR_MODEL_KEYS = list(MODEL_NAMES.keys())
 
+# ====== LANGUAGE CONFIG ======
+LANGUAGES = {
+    "English": "English",
+    "Hindi (हिन्दी)": "Hindi",
+    "Punjabi (ਪੰਜਾਬੀ)": "Punjabi",
+    "Tamil (தமிழ்)": "Tamil",
+    "Telugu (తెలుగు)": "Telugu",
+    "Bengali (বাংলা)": "Bengali",
+    "Marathi (मराठी)": "Marathi",
+}
+
+# ====== MOOD TAG CONFIG ======
+MOOD_TAGS = {
+    "😔 Sad": "I have been feeling very sad and low lately.",
+    "😤 Angry": "I have been feeling very angry and frustrated.",
+    "😰 Anxious": "I have been feeling extremely anxious and worried.",
+    "😞 Hopeless": "I feel hopeless and like things won't get better.",
+    "😴 Exhausted": "I am completely exhausted and have no energy.",
+}
+
 # -------------------------
-# Safe generate wrapper with fallback and exponential backoff
+# Safe generate wrapper
 # -------------------------
 def safe_generate(model_id, prompt, max_retries=2, backoff_base=2):
     attempt = 0
@@ -88,13 +137,9 @@ def safe_generate(model_id, prompt, max_retries=2, backoff_base=2):
     return None
 
 # -------------------------
-# NEW: Transcribe audio via Gemini Files API (multimodal)
+# Transcribe audio via Gemini Files API
 # -------------------------
 def transcribe_audio(audio_bytes, model_id):
-    """
-    Upload audio bytes to Gemini Files API and transcribe using the chosen model.
-    Returns the transcribed text string, or None on failure.
-    """
     tmp_path = None
     uploaded_file = None
     try:
@@ -132,7 +177,7 @@ def transcribe_audio(audio_bytes, model_id):
                 pass
 
 # -------------------------
-# Lexicon scoring (same but stable)
+# Negation-aware Lexicon scoring
 # -------------------------
 LEXICON_WEIGHTS = {
     "suicid": 5, "kill myself": 5, "end my life": 5, "i want to die": 5, "worthless": 4,
@@ -141,18 +186,73 @@ LEXICON_WEIGHTS = {
     "tired": 1.5, "exhausted": 2, "can't sleep": 2, "insomnia": 2, "angry": 1.5, "sad": 2
 }
 
+NEGATION_WORDS = {
+    "not", "no", "never", "don't", "doesn't", "didn't", "isn't", "aren't",
+    "wasn't", "weren't", "can't", "cannot", "won't", "wouldn't", "shouldn't",
+    "hardly", "barely", "scarcely"
+}
+
+DISTANCING_PHRASES = [
+    "my friend", "my sister", "my brother", "my colleague", "someone i know",
+    "i read about", "i heard about", "i learned about", "i watched", "a person",
+    "they feel", "he feels", "she feels", "in a movie", "in a book", "in the news"
+]
+
 def lexicon_score(text):
     t = text.lower()
+    tokens = re.split(r'\W+', t)
     score = 0.0
+
+    distancing = any(phrase in t for phrase in DISTANCING_PHRASES)
+    dist_factor = 0.25 if distancing else 1.0
+
     for kw, w in LEXICON_WEIGHTS.items():
-        if kw in t:
-            score += w
-    if any(k in t for k in ["suicid", "kill myself", "i want to die", "end my life"]):
-        score = max(score, 8.0)
+        if kw not in t:
+            continue
+
+        kw_tokens = kw.split()
+        kw_pos = -1
+        for i in range(len(tokens) - len(kw_tokens) + 1):
+            if tokens[i:i + len(kw_tokens)] == kw_tokens:
+                kw_pos = i
+                break
+
+        if kw_pos == -1:
+            # multi-word phrase match fallback
+            if kw in t:
+                kw_pos = 999
+
+        negated = False
+        if kw_pos != -1 and kw_pos != 999:
+            window_start = max(0, kw_pos - 4)
+            preceding_tokens = tokens[window_start:kw_pos]
+            if any(neg in preceding_tokens for neg in NEGATION_WORDS):
+                negated = True
+
+        if not negated:
+            score += w * dist_factor
+
+    crisis_keywords = ["suicid", "kill myself", "i want to die", "end my life"]
+    has_crisis = any(k in t for k in crisis_keywords)
+    if has_crisis:
+        crisis_tokens = re.split(r'\W+', t)
+        crisis_negated = False
+        for k in crisis_keywords:
+            if k in t:
+                k_tokens = k.split()
+                for i in range(len(crisis_tokens) - len(k_tokens) + 1):
+                    if crisis_tokens[i:i + len(k_tokens)] == k_tokens:
+                        window_start = max(0, i - 4)
+                        preceding = crisis_tokens[window_start:i]
+                        if any(neg in preceding for neg in NEGATION_WORDS):
+                            crisis_negated = True
+        if not crisis_negated:
+            score = max(score, 8.0)
+
     return int(round(min(1.0, score / 10.0) * 100))
 
 # -------------------------
-# Deep reasoning check (model rates intensity 0-100)
+# Deep reasoning check
 # -------------------------
 def ask_model_for_intensity(user_text, model_id):
     prompt = (
@@ -176,7 +276,7 @@ def ask_model_for_intensity(user_text, model_id):
         return None
 
 # -------------------------
-# Model structured stress extraction (robust JSON parse + repair)
+# Model structured stress extraction
 # -------------------------
 def ask_model_for_structured_stress(user_text, model_id):
     prompt = (
@@ -212,7 +312,7 @@ def ask_model_for_structured_stress(user_text, model_id):
     return {"model_score": score, "evidence": evidence, "confidence": confidence}
 
 # -------------------------
-# Combined scoring (Balanced - Option B)
+# Combined scoring
 # -------------------------
 def get_stress_level(user_text, model_id):
     lex = lexicon_score(user_text)
@@ -282,12 +382,17 @@ def get_stress_desc(level):
     return "😰 High Stress — Strong distress detected."
 
 # -------------------------
-# Support message builder (more specific)
+# Support message builder (language-aware)
 # -------------------------
-def build_support_prompt(mode, text):
+def build_support_prompt(mode, text, lang="English"):
+    lang_instruction = (
+        f"Respond entirely in {lang}. "
+        if lang != "English"
+        else ""
+    )
     return f"""
 You are a deeply empathetic professional mental-health assistant.
-Use the user's exact phrases where relevant. Be specific and avoid generic stock responses.
+{lang_instruction}Use the user's exact phrases where relevant. Be specific and avoid generic stock responses.
 
 User text:
 {text}
@@ -311,7 +416,26 @@ Talk to your loved ones for support.
 """
 
 # -------------------------
-# UI HEADER (unchanged)
+# Breathing widget renderer
+# -------------------------
+def show_breathing_widget():
+    st.markdown("""
+    <div class="breathing-widget">
+        <h4>🌬️ Breathing Exercise — Try This Now</h4>
+        <div class="breath-circle">
+            <div class="breath-inner">Breathe<br>In &amp; Out</div>
+        </div>
+        <div class="breath-steps">
+            ● Inhale slowly — <strong>4 seconds</strong><br>
+            ● Hold gently — <strong>4 seconds</strong><br>
+            ● Exhale fully — <strong>6 seconds</strong><br>
+            ● Repeat 4–6 cycles
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+# -------------------------
+# UI HEADER
 # -------------------------
 st.markdown("""
 <div class="main-header">
@@ -320,7 +444,6 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-# QUOTES (unchanged)
 st.markdown("""
 <div style="
     background:rgba(49,24,94,0.55);
@@ -338,24 +461,33 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # -------------------------
-# SIDEBAR (unchanged labels)
+# SIDEBAR
 # -------------------------
 with st.sidebar:
     st.write("## Settings")
     chosen_model_name = st.selectbox("Choose AI Model", SIDEBAR_MODEL_KEYS, index=1)
     model_id = MODEL_NAMES[chosen_model_name]
     mode = st.radio("Analysis Mode", ["Crisis Detection", "Emotional Support", "Risk Assessment"])
+
+    st.write("### 🌐 Language")
+    chosen_lang_label = st.selectbox("Response Language", list(LANGUAGES.keys()), index=0)
+    selected_lang = LANGUAGES[chosen_lang_label]
+
     st.write("### Emergency Resources")
     st.info("**KIRAN:** 1800-599-0019\n**Vandrevala:** 1860-2662-345\n**iCall:** 9152987821")
 
 # -------------------------
-# Session state init for voice transcript
+# Session state init
 # -------------------------
 if "voice_transcript" not in st.session_state:
     st.session_state["voice_transcript"] = ""
+if "last_request_time" not in st.session_state:
+    st.session_state["last_request_time"] = 0.0
+if "mood_prefill" not in st.session_state:
+    st.session_state["mood_prefill"] = ""
 
 # -------------------------
-# MAIN UI (unchanged layout)
+# MAIN UI
 # -------------------------
 col1, col2 = st.columns([2, 1])
 
@@ -365,7 +497,26 @@ with col1:
 
     with tab1:
         st.markdown('<div class="info-card"><h3>Write your feelings</h3>', unsafe_allow_html=True)
-        input_text = st.text_area("Describe your feelings.", height=160)
+
+        # ── Mood Tag Buttons ──
+        st.markdown("**Quick Mood Tags** — tap to pre-fill:")
+        mood_cols = st.columns(len(MOOD_TAGS))
+        for idx, (tag_label, tag_text) in enumerate(MOOD_TAGS.items()):
+            with mood_cols[idx]:
+                if st.button(tag_label, key=f"mood_{idx}"):
+                    st.session_state["mood_prefill"] = tag_text
+
+        prefill_value = st.session_state.get("mood_prefill", "")
+        input_text = st.text_area(
+            "Describe your feelings.",
+            value=prefill_value,
+            height=160,
+            key="text_input_area"
+        )
+        # Clear prefill after it's been rendered into the text area
+        if prefill_value:
+            st.session_state["mood_prefill"] = ""
+
         st.markdown('</div>', unsafe_allow_html=True)
 
     with tab2:
@@ -397,11 +548,32 @@ with col1:
 
         st.markdown('</div>', unsafe_allow_html=True)
 
-    # Resolve final input: text tab takes priority; fall back to voice transcript
+    # Resolve final input
     if not input_text.strip() and st.session_state.get("voice_transcript"):
         input_text = st.session_state["voice_transcript"]
 
-    if st.button("🔍 Analyze & Get Support", use_container_width=True) and input_text.strip():
+    # ── Cooldown check ──
+    now = time.time()
+    elapsed = now - st.session_state["last_request_time"]
+    cooldown_seconds = 5
+    on_cooldown = elapsed < cooldown_seconds
+
+    if on_cooldown:
+        remaining = int(cooldown_seconds - elapsed) + 1
+        st.markdown(
+            f'<div class="cooldown-bar">⏳ Please wait {remaining}s before analyzing again.</div>',
+            unsafe_allow_html=True
+        )
+
+    analyze_clicked = st.button(
+        "🔍 Analyze & Get Support",
+        use_container_width=True,
+        disabled=on_cooldown
+    )
+
+    if analyze_clicked and input_text.strip() and not on_cooldown:
+        st.session_state["last_request_time"] = time.time()
+
         with st.spinner("Analyzing..."):
             final_level, meta = get_stress_level(input_text, model_id)
 
@@ -417,7 +589,11 @@ with col1:
             </div>
             """, unsafe_allow_html=True)
 
-            support_prompt = build_support_prompt(mode, input_text)
+            # ── Auto-trigger breathing widget when stress > 70 ──
+            if final_level > 70:
+                show_breathing_widget()
+
+            support_prompt = build_support_prompt(mode, input_text, lang=selected_lang)
             response = safe_generate(model_id, support_prompt)
 
             st.markdown('<div class="response-area">', unsafe_allow_html=True)
@@ -443,7 +619,6 @@ Talk to your loved ones for support.
                 st.markdown(fallback_text)
             st.markdown('</div>', unsafe_allow_html=True)
 
-        # Clear voice transcript after analysis so next recording starts fresh
         st.session_state["voice_transcript"] = ""
 
 with col2:
@@ -451,7 +626,7 @@ with col2:
     st.markdown('<div class="info-card"><h3>Modes</h3>- Crisis Detection\n- Emotional Support\n- Risk Assessment</div>', unsafe_allow_html=True)
     st.markdown('<div class="emergency-banner">🚨 IN CRISIS? CALL KIRAN 1800-599-0019 🚨</div>', unsafe_allow_html=True)
 
-# Footer (unchanged)
+# Footer
 st.markdown("---")
 st.markdown("""
 <div class="footer-dark">
