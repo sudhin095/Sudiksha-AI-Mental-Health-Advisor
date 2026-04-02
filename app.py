@@ -6,6 +6,8 @@ import json
 import time
 import tempfile
 import os
+from datetime import datetime, timedelta
+from collections import Counter, defaultdict
 
 # =========================
 # GEMINI API KEY (Secrets)
@@ -54,16 +56,11 @@ st.markdown("""
     .mood-tag-btn button {background:rgba(49,24,94,0.8)!important;border:1px solid #bb86fc!important;border-radius:20px!important;color:#e8d6ff!important;font-size:0.9rem!important;padding:0.3rem 0.9rem!important;margin:0.2rem!important;}
     .cooldown-bar {background:rgba(255,107,107,0.15);border:1px solid #ff6b6b60;border-radius:10px;padding:0.6rem 1rem;color:#ff6b6b;font-size:0.9rem;text-align:center;margin-bottom:0.5rem;}
 
-    /* ---- Breathing Widget ---- */
     @keyframes breathe {
         0%   { transform: scale(1);   box-shadow: 0 0 0px #00fff580; }
         40%  { transform: scale(1.45); box-shadow: 0 0 38px #00fff5cc; }
         60%  { transform: scale(1.45); box-shadow: 0 0 38px #00fff5cc; }
         100% { transform: scale(1);   box-shadow: 0 0 0px #00fff580; }
-    }
-    @keyframes breatheText {
-        0%,100% { opacity:0.5; content:"Breathe In…"; }
-        40%,60% { opacity:1;   content:"Hold…"; }
     }
     .breathing-widget {
         display:flex; flex-direction:column; align-items:center;
@@ -80,8 +77,42 @@ st.markdown("""
     }
     .breath-inner { color:#00fff5; font-size:0.72rem; text-align:center; line-height:1.4; font-weight:600; letter-spacing:0.5px; }
     .breath-steps { color:#c9aaff; font-size:0.8rem; margin-top:0.7rem; text-align:center; line-height:1.8; }
+
+    .feature-card {
+        background: rgba(0,255,245,0.05);
+        border: 1px solid rgba(0,255,245,0.20);
+        border-radius: 14px;
+        padding: 1rem;
+        margin-top: 0.8rem;
+        color: #e8d6ff;
+    }
+    .small-note {
+        color:#c9aaff;
+        font-size:0.88rem;
+    }
+    .section-title {
+        color:#00fff5;
+        font-size:1.15rem;
+        font-weight:700;
+        margin-top:1rem;
+        margin-bottom:0.5rem;
+    }
+    .pill {
+        display:inline-block;
+        background: rgba(187,134,252,0.18);
+        border:1px solid rgba(187,134,252,0.35);
+        color:#f1dcff;
+        padding:0.3rem 0.7rem;
+        border-radius:999px;
+        font-size:0.82rem;
+        margin:0.2rem 0.25rem 0.2rem 0;
+    }
 </style>
 """, unsafe_allow_html=True)
+
+# ====== FILE PATHS ======
+HISTORY_FILE = "stress_history.json"
+JOURNAL_FILE = "journal_entries.json"
 
 # ====== MODEL NAMES ======
 MODEL_NAMES = {
@@ -109,6 +140,44 @@ MOOD_TAGS = {
     "😞 Hopeless": "I feel hopeless and like things won't get better.",
     "😴 Exhausted": "I am completely exhausted and have no energy.",
 }
+
+# ====== TOPIC CATEGORIES ======
+TOPIC_KEYWORDS = {
+    "Work": ["job", "work", "boss", "office", "deadline", "career", "coworker", "promotion"],
+    "Relationships": ["partner", "relationship", "boyfriend", "girlfriend", "marriage", "family", "friend", "parents"],
+    "Health": ["health", "illness", "pain", "doctor", "sleep", "tired", "fatigue", "panic", "anxiety"],
+    "Finances": ["money", "loan", "debt", "rent", "bills", "finance", "salary", "fees"],
+    "Exams": ["exam", "college", "study", "result", "assignment", "semester", "school", "class"],
+}
+
+# -------------------------
+# JSON storage helpers
+# -------------------------
+def load_json_file(path, default):
+    if not os.path.exists(path):
+        return default
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return default
+
+def save_json_file(path, data):
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        st.warning(f"Could not save data to {path}: {e}")
+
+def append_history_entry(entry):
+    data = load_json_file(HISTORY_FILE, [])
+    data.append(entry)
+    save_json_file(HISTORY_FILE, data)
+
+def append_journal_entry(entry):
+    data = load_json_file(JOURNAL_FILE, [])
+    data.append(entry)
+    save_json_file(JOURNAL_FILE, data)
 
 # -------------------------
 # Safe generate wrapper
@@ -218,7 +287,6 @@ def lexicon_score(text):
                 break
 
         if kw_pos == -1:
-            # multi-word phrase match fallback
             if kw in t:
                 kw_pos = 999
 
@@ -283,9 +351,10 @@ def ask_model_for_structured_stress(user_text, model_id):
         "Return ONLY a single JSON object with keys:\n"
         "score: integer 0-100\n"
         "evidence: array of brief verbatim phrases from the user's text\n"
-        "confidence: float 0.0-1.0\n\n"
+        "confidence: float 0.0-1.0\n"
+        "emotion: short emotion label\n\n"
         f"User text:\n{user_text}\n\n"
-        "Example: {\"score\":72, \"evidence\": [\"I can't sleep\"], \"confidence\":0.83}"
+        "Example: {\"score\":72, \"evidence\": [\"I can't sleep\"], \"confidence\":0.83, \"emotion\":\"anxious\"}"
     )
     resp = safe_generate(model_id, prompt)
     if not resp:
@@ -309,7 +378,8 @@ def ask_model_for_structured_stress(user_text, model_id):
     score = int(max(0, min(100, int(data.get("score", 50)))))
     evidence = data.get("evidence", [])
     confidence = float(max(0.0, min(1.0, float(data.get("confidence", 0.5)))))
-    return {"model_score": score, "evidence": evidence, "confidence": confidence}
+    emotion = str(data.get("emotion", "unknown")).strip()
+    return {"model_score": score, "evidence": evidence, "confidence": confidence, "emotion": emotion}
 
 # -------------------------
 # Combined scoring
@@ -323,10 +393,14 @@ def get_stress_level(user_text, model_id):
     model_conf = 0.0
     reasoning_score = None
     reasoning_conf = 0.0
+    emotion = "unknown"
+    evidence = []
 
     if structured:
         model_score = structured["model_score"]
         model_conf = structured.get("confidence", 0.5)
+        emotion = structured.get("emotion", "unknown")
+        evidence = structured.get("evidence", [])
     if reasoning:
         reasoning_score = reasoning["intensity"]
         reasoning_conf = reasoning.get("confidence", 0.5)
@@ -371,7 +445,9 @@ def get_stress_level(user_text, model_id):
         "model_conf": model_conf if model_score is not None else None,
         "lex_score": lex,
         "reasoning_score": rs if reasoning_score is not None else None,
-        "weights": {"model": round(w_model, 3), "lex": round(w_lex, 3), "reason": round(w_reason, 3)}
+        "weights": {"model": round(w_model, 3), "lex": round(w_lex, 3), "reason": round(w_reason, 3)},
+        "emotion": emotion,
+        "evidence": evidence
     }
     return final, meta
 
@@ -380,6 +456,78 @@ def get_stress_desc(level):
     if level < 50: return "🙂 Mild Stress — Manageable tension."
     if level < 75: return "😟 Moderate Stress — Consider coping tools."
     return "😰 High Stress — Strong distress detected."
+
+# -------------------------
+# NEW FEATURE: topic detection
+# -------------------------
+def detect_topics(text):
+    text_lower = text.lower()
+    found = defaultdict(list)
+    for topic, keywords in TOPIC_KEYWORDS.items():
+        for kw in keywords:
+            if kw in text_lower:
+                found[topic].append(kw)
+    return dict(found)
+
+def highlight_detected_phrases(text, topics_found):
+    highlighted = text
+    all_keywords = []
+    for kws in topics_found.values():
+        all_keywords.extend(kws)
+    all_keywords = sorted(set(all_keywords), key=len, reverse=True)
+    for kw in all_keywords:
+        pattern = re.compile(re.escape(kw), re.IGNORECASE)
+        highlighted = pattern.sub(lambda m: f"`{m.group(0)}`", highlighted)
+    return highlighted
+
+# -------------------------
+# NEW FEATURE: trend scoring
+# -------------------------
+def compute_trends(history):
+    if not history:
+        return None
+
+    today = datetime.now()
+    last_7 = []
+    prev_7 = []
+    last_30 = []
+    prev_30 = []
+
+    for item in history:
+        try:
+            dt = datetime.fromisoformat(item["timestamp"])
+            score = item["score"]
+            delta = today - dt
+
+            if delta.days < 7:
+                last_7.append(score)
+            elif 7 <= delta.days < 14:
+                prev_7.append(score)
+
+            if delta.days < 30:
+                last_30.append(score)
+            elif 30 <= delta.days < 60:
+                prev_30.append(score)
+        except Exception:
+            continue
+
+    result = {}
+    if last_7:
+        avg7 = sum(last_7) / len(last_7)
+        result["avg_7"] = round(avg7, 1)
+        if prev_7:
+            prev_avg7 = sum(prev_7) / len(prev_7)
+            if prev_avg7 > 0:
+                result["change_7"] = round(((avg7 - prev_avg7) / prev_avg7) * 100, 1)
+
+    if last_30:
+        avg30 = sum(last_30) / len(last_30)
+        result["avg_30"] = round(avg30, 1)
+        if prev_30:
+            prev_avg30 = sum(prev_30) / len(prev_30)
+            if prev_avg30 > 0:
+                result["change_30"] = round(((avg30 - prev_avg30) / prev_avg30) * 100, 1)
+    return result
 
 # -------------------------
 # Support message builder (language-aware)
@@ -416,6 +564,38 @@ Talk to your loved ones for support.
 """
 
 # -------------------------
+# Adaptive suggestions
+# -------------------------
+def get_adaptive_suggestions(level):
+    if level < 30:
+        return {
+            "band": "Low",
+            "items": [
+                "Read a short note on how normal stress works in the body.",
+                "Take a 5-minute stretch or hydration break.",
+                "Do a quick check-in tonight: what went well today?"
+            ]
+        }
+    elif level < 70:
+        return {
+            "band": "Moderate",
+            "items": [
+                "Use the breathing exercise for 3–5 cycles.",
+                "Try a grounding exercise like 5-4-3-2-1.",
+                "Break your biggest problem into one tiny next step."
+            ]
+        }
+    else:
+        return {
+            "band": "High",
+            "items": [
+                "Pause and contact a trusted person today.",
+                "Use breathing + grounding before making major decisions.",
+                "If distress gets stronger or you feel unsafe, contact a helpline immediately."
+            ]
+        }
+
+# -------------------------
 # Breathing widget renderer
 # -------------------------
 def show_breathing_widget():
@@ -433,6 +613,108 @@ def show_breathing_widget():
         </div>
     </div>
     """, unsafe_allow_html=True)
+
+# -------------------------
+# Grounding / relaxation tools
+# -------------------------
+def show_toolkit():
+    st.markdown('<div class="section-title">🧰 Toolkit of Exercises</div>', unsafe_allow_html=True)
+    t1, t2, t3 = st.tabs(["5-4-3-2-1 Grounding", "Muscle Relaxation", "Journal Prompt"])
+
+    with t1:
+        st.markdown("""
+**5-4-3-2-1 Grounding**
+- 5 things you can see
+- 4 things you can feel
+- 3 things you can hear
+- 2 things you can smell
+- 1 thing you can taste
+""")
+
+    with t2:
+        st.markdown("""
+**Progressive Muscle Relaxation**
+1. Tighten your shoulders for 5 seconds, then release.  
+2. Clench your fists for 5 seconds, then release.  
+3. Tighten your legs for 5 seconds, then release.  
+4. Notice the difference between tension and relaxation.
+""")
+
+    with t3:
+        prompts = [
+            "What is the one thing bothering me most right now?",
+            "What do I need today instead of what I think I 'should' do?",
+            "If I spoke to myself like a friend, what would I say?"
+        ]
+        day_index = datetime.now().day % len(prompts)
+        st.markdown(f"**Prompt of the Day:** {prompts[day_index]}")
+        st.text_area("Write your answer here", height=120, key="journal_prompt_box")
+
+# -------------------------
+# Dashboard rendering
+# -------------------------
+def show_dashboard(history, journal_entries):
+    st.markdown('<div class="section-title">📈 Personal Dashboard</div>', unsafe_allow_html=True)
+    if not history:
+        st.info("No saved history yet. Analyze at least one entry to build your dashboard.")
+        return
+
+    scores = []
+    dates = []
+    emotions = []
+    topics = []
+
+    for item in history[-30:]:
+        scores.append(item.get("score", 0))
+        dates.append(item.get("timestamp", "")[:10])
+        emotions.append(item.get("emotion", "unknown"))
+        topics.extend(item.get("topics", []))
+
+    chart_data = {"Date": dates, "Stress Score": scores}
+    st.line_chart(chart_data, x="Date", y="Stress Score")
+
+    emotion_counts = Counter([e for e in emotions if e and e != "unknown"]).most_common(3)
+    topic_counts = Counter(topics).most_common(3)
+
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown("**Top 3 Recurring Emotions**")
+        if emotion_counts:
+            for emotion, cnt in emotion_counts:
+                st.markdown(f"- {emotion}: {cnt}")
+        else:
+            st.markdown("- Not enough data yet")
+
+    with c2:
+        st.markdown("**Most Common Stress Topics**")
+        if topic_counts:
+            for topic, cnt in topic_counts:
+                st.markdown(f"- {topic}: {cnt}")
+        else:
+            st.markdown("- Not enough data yet")
+
+    if journal_entries:
+        st.markdown("**Recent Journal Tags**")
+        recent_tags = []
+        for entry in journal_entries[-10:]:
+            recent_tags.extend(entry.get("tags", []))
+        tag_counts = Counter(recent_tags).most_common(6)
+        if tag_counts:
+            st.markdown(" ".join([f"<span class='pill'>{tag} ({cnt})</span>" for tag, cnt in tag_counts]), unsafe_allow_html=True)
+
+# -------------------------
+# Reminder banner
+# -------------------------
+def show_reminder_banner(history):
+    if not history:
+        return
+    try:
+        last_dt = datetime.fromisoformat(history[-1]["timestamp"])
+        days_gap = (datetime.now() - last_dt).days
+        if days_gap >= 3:
+            st.info(f"🔔 You haven’t checked in for {days_gap} days. Want a quick 1-minute check-in?")
+    except Exception:
+        pass
 
 # -------------------------
 # UI HEADER
@@ -461,6 +743,12 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # -------------------------
+# Load persisted data
+# -------------------------
+history_data = load_json_file(HISTORY_FILE, [])
+journal_data = load_json_file(JOURNAL_FILE, [])
+
+# -------------------------
 # SIDEBAR
 # -------------------------
 with st.sidebar:
@@ -476,6 +764,14 @@ with st.sidebar:
     st.write("### Emergency Resources")
     st.info("**KIRAN:** 1800-599-0019\n**Vandrevala:** 1860-2662-345\n**iCall:** 9152987821")
 
+    st.write("### 🔐 Data & Privacy")
+    st.caption("Stored locally: text summary, score, timestamp, tags, emotion, topics.")
+    st.caption("Use 'Clear my saved data' to remove local history and journal entries.")
+    if st.button("🗑 Clear my saved data"):
+        save_json_file(HISTORY_FILE, [])
+        save_json_file(JOURNAL_FILE, [])
+        st.success("Saved local data cleared.")
+
 # -------------------------
 # Session state init
 # -------------------------
@@ -485,6 +781,13 @@ if "last_request_time" not in st.session_state:
     st.session_state["last_request_time"] = 0.0
 if "mood_prefill" not in st.session_state:
     st.session_state["mood_prefill"] = ""
+if "last_analysis_result" not in st.session_state:
+    st.session_state["last_analysis_result"] = None
+
+# -------------------------
+# Reminder
+# -------------------------
+show_reminder_banner(history_data)
 
 # -------------------------
 # MAIN UI
@@ -492,115 +795,127 @@ if "mood_prefill" not in st.session_state:
 col1, col2 = st.columns([2, 1])
 
 with col1:
-    tab1, tab2 = st.tabs(["✍️ Text", "🎤 Voice"])
-    input_text = ""
+    app_tabs = st.tabs(["✍️ Analyze", "📈 Dashboard", "🧾 Journal", "🧰 Tools"])
 
-    with tab1:
-        st.markdown('<div class="info-card"><h3>Write your feelings</h3>', unsafe_allow_html=True)
+    with app_tabs[0]:
+        tab1, tab2 = st.tabs(["✍️ Text", "🎤 Voice"])
+        input_text = ""
 
-        # ── Mood Tag Buttons ──
-        st.markdown("**Quick Mood Tags** — tap to pre-fill:")
-        mood_cols = st.columns(len(MOOD_TAGS))
-        for idx, (tag_label, tag_text) in enumerate(MOOD_TAGS.items()):
-            with mood_cols[idx]:
-                if st.button(tag_label, key=f"mood_{idx}"):
-                    st.session_state["mood_prefill"] = tag_text
+        with tab1:
+            st.markdown('<div class="info-card"><h3>Write your feelings</h3>', unsafe_allow_html=True)
 
-        prefill_value = st.session_state.get("mood_prefill", "")
-        input_text = st.text_area(
-            "Describe your feelings.",
-            value=prefill_value,
-            height=160,
-            key="text_input_area"
-        )
-        # Clear prefill after it's been rendered into the text area
-        if prefill_value:
-            st.session_state["mood_prefill"] = ""
+            st.markdown("**Quick Mood Tags** — tap to pre-fill:")
+            mood_cols = st.columns(len(MOOD_TAGS))
+            for idx, (tag_label, tag_text) in enumerate(MOOD_TAGS.items()):
+                with mood_cols[idx]:
+                    if st.button(tag_label, key=f"mood_{idx}"):
+                        st.session_state["mood_prefill"] = tag_text
 
-        st.markdown('</div>', unsafe_allow_html=True)
+            prefill_value = st.session_state.get("mood_prefill", "")
+            input_text = st.text_area(
+                "Describe your feelings.",
+                value=prefill_value,
+                height=160,
+                key="text_input_area"
+            )
+            if prefill_value:
+                st.session_state["mood_prefill"] = ""
 
-    with tab2:
-        st.markdown('<div class="info-card"><h3>Speak your mind</h3>', unsafe_allow_html=True)
-        audio_data = mic_recorder(start_prompt="🎤 Start Recording", stop_prompt="⏹ Stop")
+            st.markdown('</div>', unsafe_allow_html=True)
 
-        if audio_data and audio_data.get("bytes"):
-            st.audio(audio_data["bytes"], format="audio/wav")
+        with tab2:
+            st.markdown('<div class="info-card"><h3>Speak your mind</h3>', unsafe_allow_html=True)
+            audio_data = mic_recorder(start_prompt="🎤 Start Recording", stop_prompt="⏹ Stop")
 
-            with st.spinner("🔄 Transcribing your voice with Gemini..."):
-                transcript = transcribe_audio(audio_data["bytes"], model_id)
+            if audio_data and audio_data.get("bytes"):
+                st.audio(audio_data["bytes"], format="audio/wav")
 
-            if transcript:
-                st.session_state["voice_transcript"] = transcript
-                st.success("✅ Voice transcribed successfully!")
+                with st.spinner("🔄 Transcribing your voice with Gemini..."):
+                    transcript = transcribe_audio(audio_data["bytes"], model_id)
+
+                if transcript:
+                    st.session_state["voice_transcript"] = transcript
+                    st.success("✅ Voice transcribed successfully!")
+                    st.markdown(
+                        f'<div class="transcript-box">📝 <strong>Transcript:</strong> {transcript}</div>',
+                        unsafe_allow_html=True
+                    )
+                else:
+                    st.warning("⚠️ Could not transcribe audio. Please try again or use the text tab.")
+                    st.session_state["voice_transcript"] = ""
+
+            elif st.session_state.get("voice_transcript"):
                 st.markdown(
-                    f'<div class="transcript-box">📝 <strong>Transcript:</strong> {transcript}</div>',
+                    f'<div class="transcript-box">📝 <strong>Last Transcript:</strong> {st.session_state["voice_transcript"]}</div>',
                     unsafe_allow_html=True
                 )
-            else:
-                st.warning("⚠️ Could not transcribe audio. Please try again or use the text tab.")
-                st.session_state["voice_transcript"] = ""
 
-        elif st.session_state.get("voice_transcript"):
+            st.markdown('</div>', unsafe_allow_html=True)
+
+        if not input_text.strip() and st.session_state.get("voice_transcript"):
+            input_text = st.session_state["voice_transcript"]
+
+        now = time.time()
+        elapsed = now - st.session_state["last_request_time"]
+        cooldown_seconds = 5
+        on_cooldown = elapsed < cooldown_seconds
+
+        if on_cooldown:
+            remaining = int(cooldown_seconds - elapsed) + 1
             st.markdown(
-                f'<div class="transcript-box">📝 <strong>Last Transcript:</strong> {st.session_state["voice_transcript"]}</div>',
+                f'<div class="cooldown-bar">⏳ Please wait {remaining}s before analyzing again.</div>',
                 unsafe_allow_html=True
             )
 
-        st.markdown('</div>', unsafe_allow_html=True)
-
-    # Resolve final input
-    if not input_text.strip() and st.session_state.get("voice_transcript"):
-        input_text = st.session_state["voice_transcript"]
-
-    # ── Cooldown check ──
-    now = time.time()
-    elapsed = now - st.session_state["last_request_time"]
-    cooldown_seconds = 5
-    on_cooldown = elapsed < cooldown_seconds
-
-    if on_cooldown:
-        remaining = int(cooldown_seconds - elapsed) + 1
-        st.markdown(
-            f'<div class="cooldown-bar">⏳ Please wait {remaining}s before analyzing again.</div>',
-            unsafe_allow_html=True
+        analyze_clicked = st.button(
+            "🔍 Analyze & Get Support",
+            use_container_width=True,
+            disabled=on_cooldown
         )
 
-    analyze_clicked = st.button(
-        "🔍 Analyze & Get Support",
-        use_container_width=True,
-        disabled=on_cooldown
-    )
+        if analyze_clicked and input_text.strip() and not on_cooldown:
+            st.session_state["last_request_time"] = time.time()
 
-    if analyze_clicked and input_text.strip() and not on_cooldown:
-        st.session_state["last_request_time"] = time.time()
+            with st.spinner("Analyzing..."):
+                final_level, meta = get_stress_level(input_text, model_id)
 
-        with st.spinner("Analyzing..."):
-            final_level, meta = get_stress_level(input_text, model_id)
-
-            st.markdown(f"""
-            <div class="stress-meter-container">
-                <div class="circular-gauge">
-                    <div class="gauge-inner">
-                        <div class="stress-percentage">{final_level}%</div>
-                        <div class="stress-label">Stress</div>
+                st.markdown(f"""
+                <div class="stress-meter-container">
+                    <div class="circular-gauge">
+                        <div class="gauge-inner">
+                            <div class="stress-percentage">{final_level}%</div>
+                            <div class="stress-label">Stress</div>
+                        </div>
                     </div>
+                    <div style="color:#bb86fc;margin-top:10px;">{get_stress_desc(final_level)}</div>
                 </div>
-                <div style="color:#bb86fc;margin-top:10px;">{get_stress_desc(final_level)}</div>
-            </div>
-            """, unsafe_allow_html=True)
+                """, unsafe_allow_html=True)
 
-            # ── Auto-trigger breathing widget when stress > 70 ──
-            if final_level > 70:
-                show_breathing_widget()
+                if final_level > 70:
+                    show_breathing_widget()
 
-            support_prompt = build_support_prompt(mode, input_text, lang=selected_lang)
-            response = safe_generate(model_id, support_prompt)
+                topics_found = detect_topics(input_text)
+                highlighted_text = highlight_detected_phrases(input_text, topics_found)
 
-            st.markdown('<div class="response-area">', unsafe_allow_html=True)
-            if response:
-                st.markdown("### AI Support\n" + response.text)
-            else:
-                fallback_text = f"""
+                st.markdown('<div class="feature-card">', unsafe_allow_html=True)
+                st.markdown("### 🧠 Context-Aware Trigger Detection")
+                if topics_found:
+                    st.markdown(f"**Detected phrases:** {highlighted_text}")
+                    st.markdown("**Likely stress areas:**")
+                    for topic, kws in topics_found.items():
+                        st.markdown(f"- **{topic}**: {', '.join(sorted(set(kws)))}")
+                else:
+                    st.markdown("No strong topic category detected from the current input.")
+                st.markdown('</div>', unsafe_allow_html=True)
+
+                support_prompt = build_support_prompt(mode, input_text, lang=selected_lang)
+                response = safe_generate(model_id, support_prompt)
+
+                st.markdown('<div class="response-area">', unsafe_allow_html=True)
+                if response:
+                    st.markdown("### AI Support\n" + response.text)
+                else:
+                    fallback_text = f"""
 ### AI Support (Fallback)
 - **Validation:** I hear that you're saying: "{input_text[:120]}..." — that sounds distressing and important.
 - **Immediate steps (tailored):**
@@ -616,15 +931,107 @@ Talk to your loved ones for support.
 **Indian Mental Health Helpline:** 1800-599-0019
 ----------------------------------------
 """
-                st.markdown(fallback_text)
-            st.markdown('</div>', unsafe_allow_html=True)
+                    st.markdown(fallback_text)
+                st.markdown('</div>', unsafe_allow_html=True)
 
-        st.session_state["voice_transcript"] = ""
+                adaptive = get_adaptive_suggestions(final_level)
+                st.markdown('<div class="feature-card">', unsafe_allow_html=True)
+                st.markdown(f"### 🎯 Adaptive Suggestions ({adaptive['band']} Stress)")
+                for item in adaptive["items"]:
+                    st.markdown(f"- {item}")
+                st.markdown('</div>', unsafe_allow_html=True)
+
+                st.markdown('<div class="feature-card">', unsafe_allow_html=True)
+                st.markdown("### ✅ Goal & Habit Cards")
+                goal1 = st.checkbox("Drink a glass of water", key=f"goal_water_{time.time()}")
+                goal2 = st.checkbox("Take a 5-minute walk", key=f"goal_walk_{time.time()}")
+                goal3 = st.checkbox("Text one trusted person", key=f"goal_text_{time.time()}")
+                completed = sum([goal1, goal2, goal3])
+                st.markdown(f"**Completed today:** {completed}/3")
+                st.markdown('</div>', unsafe_allow_html=True)
+
+                entry = {
+                    "timestamp": datetime.now().isoformat(),
+                    "score": final_level,
+                    "emotion": meta.get("emotion", "unknown"),
+                    "topics": list(topics_found.keys()),
+                    "input_preview": input_text[:180]
+                }
+                append_history_entry(entry)
+                history_data = load_json_file(HISTORY_FILE, [])
+
+                trends = compute_trends(history_data)
+                if trends:
+                    st.markdown('<div class="feature-card">', unsafe_allow_html=True)
+                    st.markdown("### 📊 Trend-Based Risk Scoring")
+                    if "avg_7" in trends:
+                        st.markdown(f"- **7-day average:** {trends['avg_7']}")
+                    if "change_7" in trends:
+                        direction = "higher" if trends["change_7"] > 0 else "lower"
+                        st.markdown(f"- Your stress is **{abs(trends['change_7'])}% {direction}** than last week.")
+                    if "avg_30" in trends:
+                        st.markdown(f"- **30-day average:** {trends['avg_30']}")
+                    if "change_30" in trends:
+                        direction = "higher" if trends["change_30"] > 0 else "lower"
+                        st.markdown(f"- Your stress is **{abs(trends['change_30'])}% {direction}** than the previous 30-day period.")
+                    st.markdown('</div>', unsafe_allow_html=True)
+
+                st.session_state["last_analysis_result"] = {
+                    "score": final_level,
+                    "emotion": meta.get("emotion", "unknown"),
+                    "topics": list(topics_found.keys()),
+                    "text": input_text
+                }
+
+            st.session_state["voice_transcript"] = ""
+
+    with app_tabs[1]:
+        show_dashboard(history_data, journal_data)
+
+    with app_tabs[2]:
+        st.markdown('<div class="section-title">🧾 Journaling & Tags</div>', unsafe_allow_html=True)
+        journal_text = st.text_area("Write a journal entry", height=140, key="journal_entry_text")
+        tag_options = ["Work", "Family", "Exams", "Health", "Finances", "Relationships"]
+        selected_tags = st.multiselect("Tags", tag_options)
+        if st.button("💾 Save Journal Entry"):
+            if journal_text.strip():
+                append_journal_entry({
+                    "timestamp": datetime.now().isoformat(),
+                    "text": journal_text.strip(),
+                    "tags": selected_tags
+                })
+                st.success("Journal entry saved.")
+                journal_data = load_json_file(JOURNAL_FILE, [])
+            else:
+                st.warning("Write something before saving.")
+
+        st.markdown("### Recent Entries")
+        if journal_data:
+            for item in reversed(journal_data[-5:]):
+                st.markdown(f"**{item['timestamp'][:16]}**")
+                st.markdown(item["text"])
+                if item.get("tags"):
+                    st.markdown(" ".join([f"<span class='pill'>{t}</span>" for t in item["tags"]]), unsafe_allow_html=True)
+                st.markdown("---")
+        else:
+            st.info("No journal entries yet.")
+
+    with app_tabs[3]:
+        show_toolkit()
 
 with col2:
     st.markdown('<div class="info-card"><h3>Why Mindful?</h3>- Modern\n- Gemini 2.5 models\n- 24/7 support</div>', unsafe_allow_html=True)
     st.markdown('<div class="info-card"><h3>Modes</h3>- Crisis Detection\n- Emotional Support\n- Risk Assessment</div>', unsafe_allow_html=True)
     st.markdown('<div class="emergency-banner">🚨 IN CRISIS? CALL KIRAN 1800-599-0019 🚨</div>', unsafe_allow_html=True)
+
+    if st.session_state.get("last_analysis_result"):
+        st.markdown('<div class="info-card"><h3>Last Analysis Snapshot</h3>', unsafe_allow_html=True)
+        lr = st.session_state["last_analysis_result"]
+        st.markdown(f"- **Score:** {lr['score']}")
+        st.markdown(f"- **Emotion:** {lr['emotion']}")
+        if lr["topics"]:
+            st.markdown(f"- **Topics:** {', '.join(lr['topics'])}")
+        st.markdown('</div>', unsafe_allow_html=True)
 
 # Footer
 st.markdown("---")
