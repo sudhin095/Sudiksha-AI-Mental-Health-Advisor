@@ -6,22 +6,70 @@ import json
 import time
 import tempfile
 import os
+import hashlib
 from datetime import datetime, timedelta
 from collections import Counter, defaultdict
+
+# ── Optional fallback SDK imports ────────────────────────────────────────────
+try:
+    from groq import Groq as GroqClient
+    GROQ_AVAILABLE = True
+except ImportError:
+    GROQ_AVAILABLE = False
+
+try:
+    from openai import OpenAI as OpenAIClient
+    OPENAI_SDK_AVAILABLE = True
+except ImportError:
+    OPENAI_SDK_AVAILABLE = False
+# ─────────────────────────────────────────────────────────────────────────────
 
 # =========================
 # GEMINI API KEY (Secrets)
 # =========================
-try:
-    GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
-except Exception:
-    GEMINI_API_KEY = None
+def _get_secret(key: str, default=None):
+    """Bulletproof secret reader — tries st.secrets then os.environ."""
+    try:
+        return st.secrets[key]
+    except Exception:
+        pass
+    return os.environ.get(key, default)
+
+GEMINI_API_KEY     = _get_secret("GEMINI_API_KEY")
+GROQ_API_KEY       = _get_secret("GROQ_API_KEY")
+OPENROUTER_API_KEY = _get_secret("OPENROUTER_API_KEY")
 
 if not GEMINI_API_KEY:
     st.error("⚠️ No GEMINI_API_KEY found. Add it to .streamlit/secrets.toml.")
     st.stop()
 
 genai.configure(api_key=GEMINI_API_KEY)
+
+# ── Groq & OpenRouter client factories (cached) ───────────────────────────────
+@st.cache_resource
+def _get_groq_client():
+    if not GROQ_AVAILABLE or not GROQ_API_KEY:
+        return None
+    try:
+        return GroqClient(api_key=GROQ_API_KEY)
+    except Exception:
+        return None
+
+@st.cache_resource
+def _get_openrouter_client():
+    if not OPENAI_SDK_AVAILABLE or not OPENROUTER_API_KEY:
+        return None
+    try:
+        return OpenAIClient(
+            api_key=OPENROUTER_API_KEY,
+            base_url="https://openrouter.ai/api/v1",
+        )
+    except Exception:
+        return None
+
+groq_client        = _get_groq_client()
+openrouter_client  = _get_openrouter_client()
+# ─────────────────────────────────────────────────────────────────────────────
 
 # =========================
 #  PAGE CONFIG + CSS
@@ -115,14 +163,22 @@ HISTORY_FILE = "stress_history.json"
 JOURNAL_FILE = "journal_entries.json"
 
 # ====== MODEL NAMES ======
-# Fallback chain: primary → secondary → tertiary
+# Updated chain: gemini-2.5-flash is now PRIMARY (highest quality)
 MODEL_CHAIN = [
-    "gemini-1.5-flash",      # Primary: fast, free-tier friendly
-    "gemini-2.0-flash",      # Secondary: newer, reliable fallback
+    "gemini-2.5-flash",      # Primary: best quality, most capable
+    "gemini-1.5-flash",      # Secondary: fast, reliable fallback
     "gemini-1.5-flash-8b",   # Tertiary: highest free-tier quota
 ]
 PRIMARY_MODEL  = MODEL_CHAIN[0]
 FALLBACK_MODEL = MODEL_CHAIN[1]
+
+# ── Groq text models (for Groq fallback chain) ────────────────────────────────
+GROQ_TEXT_MODELS = [
+    "llama-3.1-8b-instant",   # fastest, highest quota
+    "llama-3.3-70b-versatile", # smarter, slightly lower quota
+]
+OPENROUTER_TEXT_MODEL = "qwen/qwen2.5-72b-instruct"
+# ─────────────────────────────────────────────────────────────────────────────
 
 # ====== LANGUAGE CONFIG ======
 LANGUAGES = {
@@ -182,47 +238,145 @@ def append_journal_entry(entry):
     data.append(entry)
     save_json_file(JOURNAL_FILE, data)
 
-# -------------------------
-# Safe generate wrapper
-# -------------------------
+# ═══════════════════════════════════════════════════════════════════════════════
+#  ULTRA-STABLE FALLBACK SYSTEM  (ported from AI Plant Doctor)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ── Response cache (saves quota on repeat prompts) ────────────────────────────
+RESPONSE_CACHE: dict = {}
+
+def _make_cache_key(prompt: str) -> str:
+    return hashlib.md5(prompt.encode("utf-8", errors="replace")).hexdigest()
+
+def _cache_get(prompt: str):
+    return RESPONSE_CACHE.get(_make_cache_key(prompt))
+
+def _cache_set(prompt: str, text: str):
+    RESPONSE_CACHE[_make_cache_key(prompt)] = text
+
+# ── Quota / transient error classifier ───────────────────────────────────────
+def _is_quota_err(e: Exception) -> bool:
+    msg = str(e).lower()
+    return any(k in msg for k in ("429", "quota", "rate limit", "resource_exhausted", "resourceexhausted"))
+
+# ── Low-level Gemini retry (single model, up to 3 attempts) ──────────────────
+def _retry_generate(model_id: str, prompt: str, max_retries: int = 3):
+    """Call one Gemini text model with exponential back-off. Returns resp or raises."""
+    last_exc = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            model = genai.GenerativeModel(model_id)
+            resp  = model.generate_content(prompt)
+            return resp
+        except Exception as e:
+            last_exc = e
+            msg = str(e).lower()
+            # Quota / unavailable → caller should try next model
+            if _is_quota_err(e) or any(k in msg for k in ("not found", "404", "invalid", "unsupported")):
+                raise
+            # Transient error → retry with back-off
+            if attempt < max_retries:
+                time.sleep(2 ** attempt)
+    raise last_exc
+
+# ── Fake response wrapper (keeps interface compatible with callers) ───────────
+class _FakeResp:
+    """Mimics genai GenerateContentResponse so existing code calling .text works."""
+    def __init__(self, text: str):
+        self.text = text
+
+# ── Full text fallback chain: Groq → OpenRouter → Gemini ─────────────────────
+def gemini_text_with_fallback(prompt: str):
+    """
+    Priority order:
+      1. Groq  llama-3.1-8b-instant      (14 400 req/day free)
+      2. Groq  llama-3.3-70b-versatile   (1 000 req/day free)
+      3. OpenRouter qwen2.5-72b           (free tier)
+      4. Gemini 2.5 Flash                (primary Gemini)
+      5. Gemini 1.5 Flash                (secondary Gemini)
+      6. Gemini 1.5 Flash-8b             (tertiary Gemini)
+    Returns (text: str, model_used: str)  or raises RuntimeError if all fail.
+    """
+    # ── 1–2. Groq ────────────────────────────────────────────────────────────
+    if groq_client:
+        for gmodel in GROQ_TEXT_MODELS:
+            try:
+                completion = groq_client.chat.completions.create(
+                    model=gmodel,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.3,
+                    max_tokens=4096,
+                )
+                text = completion.choices[0].message.content or ""
+                if text.strip():
+                    return text, gmodel
+            except Exception as e:
+                if _is_quota_err(e):
+                    continue   # try next Groq model
+                # Non-quota Groq error → skip to OpenRouter
+                break
+
+    # ── 3. OpenRouter ────────────────────────────────────────────────────────
+    if openrouter_client:
+        try:
+            completion = openrouter_client.chat.completions.create(
+                model=OPENROUTER_TEXT_MODEL,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.3,
+                max_tokens=4096,
+            )
+            text = completion.choices[0].message.content or ""
+            if text.strip():
+                return text, OPENROUTER_TEXT_MODEL
+        except Exception:
+            pass
+
+    # ── 4–6. Gemini chain ────────────────────────────────────────────────────
+    tried = []
+    for model_id in MODEL_CHAIN:
+        try:
+            resp = _retry_generate(model_id, prompt)
+            text = resp.text or ""
+            if text.strip():
+                return text, model_id
+        except Exception as e:
+            tried.append(model_id)
+            if _is_quota_err(e):
+                if len(tried) < len(MODEL_CHAIN):
+                    next_m = MODEL_CHAIN[len(tried)]
+                    st.warning(f"⚠️ {model_id} quota reached — switching to {next_m}.")
+                continue
+            # Non-quota Gemini error — still try next model
+            continue
+
+    raise RuntimeError(f"All AI models exhausted. Tried Groq, OpenRouter, and Gemini ({', '.join(tried)}).")
+
+# ── safe_generate: drop-in replacement — same interface, now ultra-stable ─────
 def safe_generate(prompt, max_retries=2, backoff_base=1.5):
     """
-    Try each model in MODEL_CHAIN in order.
-    Chain: gemini-1.5-flash → gemini-2.0-flash → gemini-1.5-flash-8b
+    Drop-in replacement for the original safe_generate().
+    Internally uses the full fallback chain (Groq → OpenRouter → Gemini).
+    Returns a response object with a .text attribute, or None on total failure.
     """
-    _last_error = ""
-    for _idx, _model_id in enumerate(MODEL_CHAIN):
-        attempt = 0
-        while attempt < max_retries:
-            try:
-                _model = genai.GenerativeModel(_model_id)
-                _resp = _model.generate_content(prompt)
-                return _resp
-            except Exception as _e:
-                _last_error = str(_e)
-                _msg = _last_error.lower()
-                _is_quota = ("429" in _msg or "quota" in _msg
-                             or "rate limit" in _msg or "resource_exhausted" in _msg)
-                if _is_quota:
-                    # Quota hit — move to next model immediately
-                    _next = MODEL_CHAIN[_idx + 1] if _idx + 1 < len(MODEL_CHAIN) else None
-                    if _next:
-                        st.warning(f"⚠️ {_model_id} quota reached — switching to {_next}.")
-                    break  # break while loop, outer for-loop picks next model
-                elif ("not found" in _msg or "404" in _msg
-                      or "invalid" in _msg or "unsupported" in _msg):
-                    # Model unavailable — skip to next immediately
-                    break
-                else:
-                    # Transient error — retry with backoff
-                    attempt += 1
-                    time.sleep(backoff_base ** attempt)
-    # All models in chain exhausted
-    st.warning(
-        "⚠️ All AI models are temporarily unavailable (quota or network issue). "
-        "Please wait a minute and try again."
-    )
-    return None
+    # Check cache first
+    cached = _cache_get(prompt)
+    if cached:
+        return _FakeResp(cached)
+
+    try:
+        text, model_used = gemini_text_with_fallback(prompt)
+        _cache_set(prompt, text)
+        return _FakeResp(text)
+    except Exception as exc:
+        st.warning(
+            f"⚠️ All AI models are temporarily unavailable. "
+            f"Please wait a minute and try again. ({exc})"
+        )
+        return None
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  END OF FALLBACK SYSTEM
+# ═══════════════════════════════════════════════════════════════════════════════
 
 # -------------------------
 # Transcribe audio via Gemini Files API
@@ -491,7 +645,7 @@ def get_stress_level(user_text, model_id):
         final = max(final, 95)
         if emotion in ("unknown", ""):
             emotion = "suicidal/crisis"
-    # ─────────────────────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────────────────
 
     meta = {
         "model_score": ms if model_score is not None else None,
@@ -540,7 +694,6 @@ def highlight_detected_phrases(text, topics_found):
 def compute_trends(history):
     if not history:
         return None
-
     today = datetime.now()
     last_7 = []
     prev_7 = []
@@ -801,7 +954,7 @@ def show_reminder_banner(history):
         last_dt = datetime.fromisoformat(history[-1]["timestamp"])
         days_gap = (datetime.now() - last_dt).days
         if days_gap >= 3:
-            st.info(f"🔔 You haven’t checked in for {days_gap} days. Want a quick 1-minute check-in?")
+            st.info(f"🔔 You haven't checked in for {days_gap} days. Want a quick 1-minute check-in?")
     except Exception:
         pass
 
@@ -842,7 +995,18 @@ journal_data = load_json_file(JOURNAL_FILE, [])
 # -------------------------
 with st.sidebar:
     st.write("## Settings")
-    st.info("🤖 **AI Engine**\n\nPrimary: Gemini 1.5 Flash\nFallback: Gemini 2.5 Flash (auto)")
+    # Updated sidebar to reflect new fallback system
+    groq_status   = "✅ Connected" if groq_client       else "❌ Not configured"
+    or_status     = "✅ Connected" if openrouter_client  else "❌ Not configured"
+    st.info(
+        f"🤖 **AI Engine — Ultra-Stable**\n\n"
+        f"**Primary:** Gemini 2.5 Flash\n"
+        f"**Fallback 1:** Gemini 1.5 Flash\n"
+        f"**Fallback 2:** Gemini 1.5 Flash-8b\n\n"
+        f"**Groq (text):** {groq_status}\n"
+        f"**OpenRouter:** {or_status}\n\n"
+        f"_Groq → OpenRouter → Gemini chain active_"
+    )
     model_id = PRIMARY_MODEL  # kept for audio transcription compatibility
     mode = st.radio("Analysis Mode", ["Crisis Detection", "Emotional Support", "Risk Assessment"])
 
@@ -892,7 +1056,6 @@ with col1:
 
         with tab1:
             st.markdown('<div class="info-card"><h3>Write your feelings</h3>', unsafe_allow_html=True)
-
             st.markdown("**Quick Mood Tags** — tap to pre-fill:")
             mood_cols = st.columns(len(MOOD_TAGS))
             for idx, (tag_label, tag_text) in enumerate(MOOD_TAGS.items()):
