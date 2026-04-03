@@ -115,8 +115,14 @@ HISTORY_FILE = "stress_history.json"
 JOURNAL_FILE = "journal_entries.json"
 
 # ====== MODEL NAMES ======
-PRIMARY_MODEL  = "models/gemini-1.5-flash"  # Primary model
-FALLBACK_MODEL = "models/gemini-2.5-flash"  # Fallback model
+# Fallback chain: primary → secondary → tertiary
+MODEL_CHAIN = [
+    "gemini-1.5-flash",      # Primary: fast, free-tier friendly
+    "gemini-2.0-flash",      # Secondary: newer, reliable fallback
+    "gemini-1.5-flash-8b",   # Tertiary: highest free-tier quota
+]
+PRIMARY_MODEL  = MODEL_CHAIN[0]
+FALLBACK_MODEL = MODEL_CHAIN[1]
 
 # ====== LANGUAGE CONFIG ======
 LANGUAGES = {
@@ -179,31 +185,51 @@ def append_journal_entry(entry):
 # -------------------------
 # Safe generate wrapper
 # -------------------------
-def safe_generate(prompt, max_retries=2, backoff_base=2):
-    """Try gemini-1.5-flash (primary), fall back to gemini-2.5-flash automatically."""
-    for _model_id in [PRIMARY_MODEL, FALLBACK_MODEL]:
+def safe_generate(prompt, max_retries=2, backoff_base=1.5):
+    """
+    Try each model in MODEL_CHAIN in order.
+    Chain: gemini-1.5-flash → gemini-2.0-flash → gemini-1.5-flash-8b
+    """
+    _last_error = ""
+    for _idx, _model_id in enumerate(MODEL_CHAIN):
         attempt = 0
-        while attempt <= max_retries:
+        while attempt < max_retries:
             try:
-                model = genai.GenerativeModel(_model_id)
-                return model.generate_content(prompt)
-            except Exception as e:
-                msg = str(e).lower()
-                if "429" in msg or "quota" in msg or "rate limit" in msg:
-                    if _model_id == PRIMARY_MODEL:
-                        st.warning("⚠️ Gemini 1.5 Flash quota reached — switching to Gemini 2.5 Flash fallback.")
-                    break  # exit while, try next model
-                attempt += 1
-                time.sleep(backoff_base ** attempt * 0.5)
-    st.error("AI request failed. Using offline fallback where possible.")
+                _model = genai.GenerativeModel(_model_id)
+                _resp = _model.generate_content(prompt)
+                return _resp
+            except Exception as _e:
+                _last_error = str(_e)
+                _msg = _last_error.lower()
+                _is_quota = ("429" in _msg or "quota" in _msg
+                             or "rate limit" in _msg or "resource_exhausted" in _msg)
+                if _is_quota:
+                    # Quota hit — move to next model immediately
+                    _next = MODEL_CHAIN[_idx + 1] if _idx + 1 < len(MODEL_CHAIN) else None
+                    if _next:
+                        st.warning(f"⚠️ {_model_id} quota reached — switching to {_next}.")
+                    break  # break while loop, outer for-loop picks next model
+                elif ("not found" in _msg or "404" in _msg
+                      or "invalid" in _msg or "unsupported" in _msg):
+                    # Model unavailable — skip to next immediately
+                    break
+                else:
+                    # Transient error — retry with backoff
+                    attempt += 1
+                    time.sleep(backoff_base ** attempt)
+    # All models in chain exhausted
+    st.warning(
+        "⚠️ All AI models are temporarily unavailable (quota or network issue). "
+        "Please wait a minute and try again."
+    )
     return None
 
 # -------------------------
 # Transcribe audio via Gemini Files API
 # -------------------------
 def transcribe_audio(audio_bytes, model_id=None):
-    # Always use PRIMARY_MODEL for transcription; model_id kept for compatibility
-    _transcribe_model = PRIMARY_MODEL
+    # Use first available model in chain for transcription
+    _transcribe_model = MODEL_CHAIN[0]
     tmp_path = None
     uploaded_file = None
     try:
