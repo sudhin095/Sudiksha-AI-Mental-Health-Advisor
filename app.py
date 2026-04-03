@@ -997,28 +997,7 @@ journal_data = load_json_file(JOURNAL_FILE, [])
 with st.sidebar:
     st.write("## Settings")
     # Updated sidebar to reflect new fallback system
-    groq_status   = "✅ Connected" if groq_client       else "❌ Not configured"
-    or_status     = "✅ Connected" if openrouter_client  else "❌ Not configured"
-    if groq_client:
-        st.success(
-            f"✅ **AI Engine — Ultra-Stable**\n\n"
-            f"**1st:** Groq Llama-3.1 (14,400/day free)\n"
-            f"**2nd:** Groq Llama-3.3-70B\n"
-            f"**3rd:** Gemini 2.5 Flash\n"
-            f"**4th:** Gemini 2.5 Flash-Lite\n"
-            f"**5th:** Gemini 1.5 Flash\n\n"
-            f"**OpenRouter:** {or_status}"
-        )
-    else:
-        st.warning(
-            f"⚠️ **Groq NOT configured!**\n\n"
-            f"Without Groq, ALL calls hit Gemini\n"
-            f"which only allows **250 req/day free**.\n\n"
-            f"👉 Get free key at console.groq.com\n"
-            f"Add **GROQ_API_KEY** to secrets.toml\n\n"
-            f"**Current chain:** Gemini only\n"
-            f"**OpenRouter:** {or_status}"
-        )
+    st.info("🤖 **AI Engine**\n\nGemini 2.5 Flash (Primary)\nAuto-fallback enabled")
     model_id = PRIMARY_MODEL  # kept for audio transcription compatibility
     mode = st.radio("Analysis Mode", ["Crisis Detection", "Emotional Support", "Risk Assessment"])
 
